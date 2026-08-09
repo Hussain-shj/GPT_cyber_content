@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.5.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.6.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -75,7 +75,7 @@ def health():
     if database_url():
         try:init_db();db_ok=True
         except:pass
-    return {"status":"ok","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_configured":bool(database_url()),"database_connected":db_ok,"version":"0.5.0","web_ui":INDEX_FILE.exists()}
+    return {"status":"ok","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_configured":bool(database_url()),"database_connected":db_ok,"version":"0.6.0","web_ui":INDEX_FILE.exists(),"grc_template":"Cyber Pulse GRC"}
 @app.get("/api/archive")
 def archive_list():
     init_db()
@@ -105,7 +105,7 @@ def archive_delete(post_id:str):
 def generate_content(req:ContentRequest):
     if not os.getenv("OPENAI_API_KEY"):return demo_payload(req)
     client=OpenAI(api_key=os.getenv("OPENAI_API_KEY"));model=os.getenv("OPENAI_MODEL","gpt-5")
-    prompt=f"""You are a senior cybersecurity GRC content strategist. Create a publish-ready {req.post_type} about {req.topic}. Domain:{req.domain}. Platform:{req.platform}. Audience:{req.audience}. Language:{req.language}. Slides:{req.slides}. Use accurate current sources from NIST,CISA,ENISA,ISACA,ISO,OECD,European Commission and official regulators. Do not invent facts or citations. Include hook,caption,recommendations,CTA,SEO keywords,hashtags,sources. For Carousel create exactly {req.slides} slides. Return ONLY JSON: {{"title":"...","hook":"...","caption":"...","recommendations":["..."],"cta":"...","keywords":["..."],"hashtags":["#..."],"slides":[{{"number":1,"headline":"...","body":"..."}}],"sources":[{{"name":"...","url":"...","why_relevant":"..."}}]}}"""
+    prompt=f"""You are a senior cybersecurity GRC content strategist. Create a publish-ready {req.post_type} about {req.topic}. Domain:{req.domain}. Platform:{req.platform}. Audience:{req.audience}. Language:{req.language}. Slides:{req.slides}. Use accurate current sources from NIST,CISA,ENISA,ISACA,ISO,OECD,European Commission and official regulators. Do not invent facts or citations. Include hook,caption,recommendations,CTA,SEO keywords,hashtags,sources. For Carousel create exactly {req.slides} slides. Keep image-slide copy concise: one strong headline and a short body suitable for a visual card. Hashtags belong in the caption metadata only and must never be part of slide text. Return ONLY JSON: {{"title":"...","hook":"...","caption":"...","recommendations":["..."],"cta":"...","keywords":["..."],"hashtags":["#..."],"slides":[{{"number":1,"headline":"...","body":"..."}}],"sources":[{{"name":"...","url":"...","why_relevant":"..."}}]}}"""
     kwargs={"model":model,"input":prompt,"store":False}
     if req.use_web_search:kwargs["tools"]=[{"type":"web_search"}]
     try:
@@ -113,15 +113,29 @@ def generate_content(req:ContentRequest):
     except Exception as exc:raise HTTPException(500,f"Generation failed: {exc}")
 
 def visual_prompt(req:ImageRequest):
-    common=f"""CURRENT SLIDE: slide {req.slide_number}. Topic/headline: {req.title}. Supporting meaning: {req.body}. Domain: {req.domain}. Analyze the slide and create a unique visual concept that explains this exact business/GRC idea. Social media 4:5 vertical composition, premium government-enterprise quality. Arabic RTL layout zones. Typography direction for later application overlay: Cairo font family, Cairo Bold for headlines and Cairo Regular/Medium for supporting Arabic text. IMPORTANT: do not render any readable text, fake Arabic, letters, logos, watermarks or brand marks inside the generated artwork; the application will overlay all Arabic text in Cairo separately. Leave intentional clean text-safe areas."""
-    if req.visual_style=="Cyber Pulse":
-        style="""CYBER PULSE style: premium Arabic cybersecurity intelligence newsroom/advisory. Deep navy and near-black background, electric cyan/blue highlights, subtle digital grid, network nodes and data signals. One dominant central visual representing the actual story, restrained threat-intelligence indicators, severity-style accent areas when relevant, authoritative not sensational. Avoid generic hooded hackers unless genuinely required. Modern SOC/intelligence report aesthetic with strong headline-safe zone and clean footer-safe zone."""
+    common=f"""CURRENT SLIDE: {req.slide_number}. Headline concept: {req.title}. Supporting meaning: {req.body}. Create one standalone 4:5 vertical social-media slide, not a collage and not multiple slides. Explain this exact concept visually with a unique central metaphor while maintaining the same locked carousel brand system across every GRC slide."""
+    if req.domain.strip().upper()=="GRC":
+        style="""LOCKED CYBER PULSE GRC TEMPLATE — use this exact visual language for ALL GRC images:
+- Premium Arabic corporate GRC infographic for government and enterprise audiences.
+- White / very light cool-gray background, subtle pale-blue dotted geometric decoration near corners, generous whitespace.
+- Deep navy primary, royal/cyber blue secondary. Green only for accept/success/compliance, orange for transfer/warning, red for avoid/critical. Do not overuse accent colors.
+- Clean flat/vector plus polished semi-3D enterprise icons: shields, check marks, governance building, clipboard/audit, magnifier, charts, targets, documents, risk indicators. No photorealism.
+- Strong editorial hierarchy modeled on a premium consulting infographic: headline-safe area at the top, one dominant concept illustration, optional 2–5 rounded information-card zones, thin connectors where useful, and a clean footer strip.
+- Arabic RTL composition. The application typography standard is Cairo: Cairo Bold for headline; Cairo Medium/Regular for body.
+- Fixed brand system to reserve in every slide footer: “نبض سيبراني | GRC | @cyberpulse_ar”. Reserve a clean footer zone for this exact identity. Do not add any hashtags anywhere in the image.
+- Fixed slide-number system: reserve a small dark-navy circular badge at the bottom-left for the slide number.
+- Slide 1 additionally reserves a compact top brand zone for “نبض سيبراني | GRC” and @cyberpulse_ar.
+- Do NOT add a hashtag bar, hashtag text, random labels, extra social handles, fake logos, watermarks, fake Arabic, English filler, or decorative words.
+- Avoid hacker clichés, hooded people, Matrix code, neon-dark gaming aesthetics, dramatic cyberattack scenes, clutter, excessive gradients and generic stock imagery.
+- The carousel must feel like one coherent Cyber Pulse GRC publication: consistent spacing, icon family, navy footer treatment, corner patterns, border radius and visual weight.
+- IMPORTANT text rule: do not attempt to render the headline/body/brand text into the generated artwork. Leave deliberate clean text-safe zones; the application will overlay correct Arabic text using Cairo. The generated artwork should contain visual components and layout only.
+"""
+    elif req.visual_style=="Cyber Pulse":
+        style="""CYBER PULSE cybersecurity-news style: deep navy/near-black background, electric cyan/blue highlights, subtle digital grid and data signals, one dominant story visual, restrained intelligence indicators, authoritative government advisory aesthetic. Leave Arabic RTL text-safe areas and a clean footer. No hashtags in artwork."""
     elif req.visual_style=="Executive Minimal":
-        style="""EXECUTIVE MINIMAL style: white/light background, extremely clean executive consulting-report aesthetic, one strong central metaphor, 2-4 restrained supporting elements, navy and blue palette, generous whitespace, refined vector icons, minimal clutter."""
-    elif req.visual_style=="Infographic":
-        style="""INFOGRAPHIC style: clean structured editorial infographic, light background, central concept with 3-5 supporting cards, professional vector icons, thin connector lines, navy primary with limited orange/green/red status accents, strong information hierarchy and generous whitespace."""
+        style="""EXECUTIVE MINIMAL: white/light background, consulting-report aesthetic, one central metaphor, 2–4 restrained supporting elements, navy/blue palette, generous whitespace, refined vector icons. Leave Arabic RTL text-safe areas. No hashtags in artwork."""
     else:
-        style="""GRC PROFESSIONAL style: clean modern corporate cybersecurity/GRC infographic inspired by premium consulting reports. White or very light background with subtle geometric patterns and generous whitespace. Deep navy primary, cyber blue secondary, limited orange for warning/risk, green for compliance/success and red for critical exposure. Use flat/vector illustrations and refined infographic elements. Layout should visually support a large headline area, short supporting statement, one central GRC concept, and 3-5 surrounding information-card zones with simple professional icons and thin relationship lines. Translate concepts intelligently: Governance = hierarchy/policy/leadership/oversight/accountability; Risk = matrix/warning/assessment/prioritization; Compliance = checklist/shield/verified controls/regulation; Third Party = organization connected to vendors; Audit = evidence/documents/magnifier/control verification; AI Governance = AI system surrounded by policy/controls/oversight; BCM = interconnected services/resilience/recovery. Avoid dark hacker imagery, hooded figures, Matrix code, dramatic attacks and gaming visuals. The image must explain the GRC concept rather than merely decorate it."""
+        style="""STRUCTURED INFOGRAPHIC: clean light background, central concept with 3–5 supporting cards, professional vector icons, thin connectors, navy primary with limited status accents, strong hierarchy and whitespace. Leave Arabic RTL text-safe areas. No hashtags in artwork."""
     return f"{style}\n{common}\nAdditional direction: {req.visual_direction}".strip()
 
 @app.post("/api/generate-image")
@@ -129,5 +143,6 @@ def generate_image(req:ImageRequest):
     if not os.getenv("OPENAI_API_KEY"):raise HTTPException(400,"OPENAI_API_KEY is not configured")
     client=OpenAI(api_key=os.getenv("OPENAI_API_KEY"));image_model=os.getenv("OPENAI_IMAGE_MODEL","gpt-image-1")
     try:
-        result=client.images.generate(model=image_model,prompt=visual_prompt(req),size="1024x1536");return {"b64_json":result.data[0].b64_json,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo"}
+        result=client.images.generate(model=image_model,prompt=visual_prompt(req),size="1024x1536")
+        return {"b64_json":result.data[0].b64_json,"slide_number":req.slide_number,"visual_style":"Cyber Pulse GRC" if req.domain.strip().upper()=="GRC" else req.visual_style,"font":"Cairo","brand":"نبض سيبراني | GRC | @cyberpulse_ar","hashtags_in_image":False}
     except Exception as exc:raise HTTPException(500,f"Image generation failed: {exc}")
