@@ -1,6 +1,10 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,16 +12,17 @@ from typing import Literal, Any
 
 import psycopg
 from psycopg.rows import dict_row
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.6.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.7.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
+AUTH_EXEMPT_PATHS = {"/health"}
 
 class ContentRequest(BaseModel):
     topic: str = Field(min_length=3, max_length=300)
@@ -52,15 +57,94 @@ def database_url(): return os.getenv("DATABASE_URL")
 def db_conn():
     if not database_url(): raise HTTPException(503,"DATABASE_URL is not configured")
     return psycopg.connect(database_url(),row_factory=dict_row)
+
+def hash_password(password: str, salt: bytes | None = None):
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310000)
+    return base64.b64encode(salt).decode("ascii"), base64.b64encode(digest).decode("ascii")
+
+def verify_password(password: str, salt_b64: str, hash_b64: str):
+    try:
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310000)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
 def init_db():
     if not database_url(): return
     with psycopg.connect(database_url()) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS posts(id TEXT PRIMARY KEY,topic_id INTEGER,topic TEXT NOT NULL,domain TEXT NOT NULL,post_type TEXT NOT NULL,platform TEXT NOT NULL,content JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_topic_id ON posts(topic_id)");conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)");conn.commit()
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_topic_id ON posts(topic_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS users(
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.commit()
+
+def bootstrap_user():
+    if not database_url(): return
+    username = os.getenv("AUTH_BOOTSTRAP_USERNAME", "").strip()
+    password = os.getenv("AUTH_BOOTSTRAP_PASSWORD", "")
+    if not username or not password: return
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        count = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+        if count == 0:
+            salt, password_hash = hash_password(password)
+            conn.execute("INSERT INTO users(id,username,password_salt,password_hash,is_active) VALUES(%s,%s,%s,%s,TRUE)", (str(uuid.uuid4()), username, salt, password_hash))
+            conn.commit()
+            print(f"Bootstrap user created: {username}")
+
+def user_count():
+    if not database_url(): return 0
+    try:
+        with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+            return conn.execute("SELECT COUNT(*) AS total FROM users WHERE is_active=TRUE").fetchone()["total"]
+    except Exception:
+        return 0
+
+def authenticate_basic(auth_header: str | None):
+    if not auth_header or not auth_header.startswith("Basic "):
+        return False
+    try:
+        raw = base64.b64decode(auth_header.split(" ", 1)[1]).decode("utf-8")
+        username, password = raw.split(":", 1)
+    except Exception:
+        return False
+    try:
+        with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+            user = conn.execute("SELECT username,password_salt,password_hash,is_active FROM users WHERE username=%s", (username,)).fetchone()
+        return bool(user and user["is_active"] and verify_password(password, user["password_salt"], user["password_hash"]))
+    except Exception:
+        return False
+
+@app.middleware("http")
+async def database_basic_auth(request: Request, call_next):
+    path = request.url.path
+    if path in AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    if not database_url():
+        return JSONResponse({"detail":"DATABASE_URL is not configured"}, status_code=503)
+    if user_count() == 0:
+        return JSONResponse({"detail":"No active users found. Set AUTH_BOOTSTRAP_USERNAME and AUTH_BOOTSTRAP_PASSWORD in Railway Variables, then redeploy."}, status_code=503)
+    if not authenticate_basic(request.headers.get("Authorization")):
+        return Response(status_code=401, headers={"WWW-Authenticate":"Basic realm=\"GPT Cyber Content\", charset=\"UTF-8\""})
+    return await call_next(request)
+
 @app.on_event("startup")
 def startup():
-    try:init_db()
-    except Exception as exc:print(f"Database startup warning: {exc}")
+    try:
+        init_db()
+        bootstrap_user()
+    except Exception as exc:
+        print(f"Database startup warning: {exc}")
 
 def demo_payload(req):
     n=req.slides if req.post_type=="Carousel" else 1
@@ -72,10 +156,12 @@ def web_app():return FileResponse(INDEX_FILE,media_type="text/html")
 @app.get("/health")
 def health():
     db_ok=False
+    users=0
     if database_url():
-        try:init_db();db_ok=True
+        try:
+            init_db(); users=user_count(); db_ok=True
         except:pass
-    return {"status":"ok","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_configured":bool(database_url()),"database_connected":db_ok,"version":"0.6.0","web_ui":INDEX_FILE.exists(),"grc_template":"Cyber Pulse GRC"}
+    return {"status":"ok","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_configured":bool(database_url()),"database_connected":db_ok,"auth_enabled":users>0,"active_users":users,"version":"0.7.0","web_ui":INDEX_FILE.exists(),"grc_template":"Cyber Pulse GRC"}
 @app.get("/api/archive")
 def archive_list():
     init_db()
@@ -105,7 +191,7 @@ def archive_delete(post_id:str):
 def generate_content(req:ContentRequest):
     if not os.getenv("OPENAI_API_KEY"):return demo_payload(req)
     client=OpenAI(api_key=os.getenv("OPENAI_API_KEY"));model=os.getenv("OPENAI_MODEL","gpt-5")
-    prompt=f"""You are a senior cybersecurity GRC content strategist. Create a publish-ready {req.post_type} about {req.topic}. Domain:{req.domain}. Platform:{req.platform}. Audience:{req.audience}. Language:{req.language}. Slides:{req.slides}. Use accurate current sources from NIST,CISA,ENISA,ISACA,ISO,OECD,European Commission and official regulators. Do not invent facts or citations. Include hook,caption,recommendations,CTA,SEO keywords,hashtags,sources. For Carousel create exactly {req.slides} slides. Keep image-slide copy concise: one strong headline and a short body suitable for a visual card. Hashtags belong in the caption metadata only and must never be part of slide text. Return ONLY JSON: {{"title":"...","hook":"...","caption":"...","recommendations":["..."],"cta":"...","keywords":["..."],"hashtags":["#..."],"slides":[{{"number":1,"headline":"...","body":"..."}}],"sources":[{{"name":"...","url":"...","why_relevant":"..."}}]}}"""
+    prompt=f"""You are a senior cybersecurity GRC content strategist. Create a publish-ready {req.post_type} about {req.topic}. Domain:{req.domain}. Platform:{req.platform}. Audience:{req.audience}. Language:{req.language}. Slides:{req.slides}. Use accurate current sources from NIST,CISA,ENISA,ISACA,ISO,OECD,European Commission and official regulators. Do not invent facts or citations. Include hook,caption,recommendations,CTA,SEO keywords,hashtags,sources. For Carousel create exactly {req.slides} slides. Keep image-slide copy concise: one strong headline and a short body suitable for a visual card. Hashtags belong in caption metadata only and must never be part of slide text. Return ONLY JSON: {{"title":"...","hook":"...","caption":"...","recommendations":["..."],"cta":"...","keywords":["..."],"hashtags":["#..."],"slides":[{{"number":1,"headline":"...","body":"..."}}],"sources":[{{"name":"...","url":"...","why_relevant":"..."}}]}}"""
     kwargs={"model":model,"input":prompt,"store":False}
     if req.use_web_search:kwargs["tools"]=[{"type":"web_search"}]
     try:
