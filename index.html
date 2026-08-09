@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPT Cyber Content</title>
+<style>
+:root{font-family:Arial,Tahoma,sans-serif;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;color:#eef6ff}.wrap{max-width:1180px;margin:auto;padding:28px}.hero{margin-bottom:22px}.hero h1{font-size:32px;margin:0 0 8px}.hero p{color:#9db0c7}.grid{display:grid;grid-template-columns:360px 1fr;gap:20px}.card{background:#0d1a2b;border:1px solid #1d3149;border-radius:18px;padding:20px;box-shadow:0 16px 40px #0003}label{display:block;font-size:13px;color:#a9bad0;margin:14px 0 7px}input,select,textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #29415e;background:#091523;color:#fff}textarea{min-height:90px;resize:vertical}button{width:100%;border:0;border-radius:11px;padding:13px;margin-top:16px;background:#16c7c7;color:#021011;font-weight:700;cursor:pointer}.secondary{background:#172b40;color:#d9efff}.status{font-size:13px;color:#91a9c2;margin-top:10px}.out h2{margin-top:0}.pill{display:inline-block;padding:5px 9px;margin:3px;border-radius:20px;background:#142b41;color:#bdefff}.slide{padding:16px;border:1px solid #25405d;border-radius:14px;margin:10px 0;background:#091625}.slide b{color:#58e3e3}.source{margin:8px 0}.source a{color:#66e1ff}.hidden{display:none}@media(max-width:800px){.grid{grid-template-columns:1fr}.wrap{padding:16px}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="hero"><h1>GPT Cyber Content</h1><p>استوديو محتوى GRC والأمن السيبراني — Carousel / Infographic / Single Post</p></div>
+<div class="grid"><section class="card">
+<label>Railway API URL</label><input id="api" placeholder="https://your-app.up.railway.app"><div class="status">يُحفظ الرابط على جهازك فقط.</div>
+<label>الموضوع</label><textarea id="topic" placeholder="مثال: Third-Party Risk Management في الجهات الحكومية"></textarea>
+<label>المجال</label><select id="domain"><option>GRC</option><option>Cybersecurity</option><option>AI Governance</option><option>Privacy</option></select>
+<label>نوع المنشور</label><select id="type"><option>Carousel</option><option>Infographic</option><option>Single Post</option></select>
+<label>المنصة</label><select id="platform"><option>Both</option><option>Instagram</option><option>LinkedIn</option></select>
+<label>الجمهور</label><input id="audience" value="Government and enterprise cybersecurity professionals">
+<label>عدد الشرائح</label><input id="slides" type="number" min="1" max="10" value="6">
+<button id="generate">إنشاء المحتوى</button><button id="save" class="secondary">حفظ إعداد Railway</button><div id="msg" class="status"></div>
+</section><section class="card out"><div id="empty"><h2>المعاينة</h2><p>أدخل موضوعًا واضغط «إنشاء المحتوى».</p></div><div id="result" class="hidden"></div></section></div></div>
+<script>
+const $=id=>document.getElementById(id);$('api').value=localStorage.getItem('gptCyberApi')||'';$('save').onclick=()=>{localStorage.setItem('gptCyberApi',$('api').value.trim().replace(/\/$/,''));$('msg').textContent='تم حفظ رابط Railway.'};
+$('generate').onclick=async()=>{const api=$('api').value.trim().replace(/\/$/,'');if(!api){$('msg').textContent='أدخل رابط Railway أولاً.';return}if(!$('topic').value.trim()){ $('msg').textContent='اكتب الموضوع.';return}localStorage.setItem('gptCyberApi',api);$('msg').textContent='جاري إنشاء المحتوى...';$('generate').disabled=true;try{const r=await fetch(api+'/api/generate-content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:$('topic').value,domain:$('domain').value,post_type:$('type').value,platform:$('platform').value,audience:$('audience').value,language:'Arabic',slides:Number($('slides').value),use_web_search:true})});const d=await r.json();if(!r.ok)throw new Error(d.detail||'API error');render(d);$('msg').textContent='تم إنشاء المحتوى — '+(d.mode||'');}catch(e){$('msg').textContent='خطأ: '+e.message}finally{$('generate').disabled=false}};
+function esc(s=''){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}function render(d){$('empty').classList.add('hidden');$('result').classList.remove('hidden');let slides=(d.slides||[]).map(x=>`<div class="slide"><b>Slide ${x.number}</b><h3>${esc(x.headline)}</h3><p>${esc(x.body)}</p></div>`).join('');let tags=(d.hashtags||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join('');let keys=(d.keywords||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join('');let rec=(d.recommendations||[]).map(x=>`<li>${esc(x)}</li>`).join('');let src=(d.sources||[]).map(x=>`<div class="source"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a> — ${esc(x.why_relevant||'')}</div>`).join('');$('result').innerHTML=`<h2>${esc(d.title)}</h2><h3>Hook</h3><p>${esc(d.hook)}</p><h3>الشرائح</h3>${slides}<h3>Caption</h3><p>${esc(d.caption)}</p><h3>التوصيات</h3><ul>${rec}</ul><h3>CTA</h3><p>${esc(d.cta)}</p><h3>SEO Keywords</h3>${keys}<h3>Hashtags</h3>${tags}<h3>المصادر</h3>${src||'<p>لا توجد مصادر في وضع Demo.</p>'}`}
+</script></body></html>
