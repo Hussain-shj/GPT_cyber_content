@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.1.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,6 +32,8 @@ class ContentRequest(BaseModel):
 
 class ImageRequest(BaseModel):
     title: str
+    body: str = ""
+    slide_number: int = 1
     post_type: Literal["Carousel", "Infographic", "Single Post"] = "Single Post"
     visual_direction: str = "Modern premium cybersecurity visual, dark navy, cyan accents, clean government-enterprise aesthetic"
 
@@ -67,12 +69,12 @@ def extract_json(text: str):
 
 @app.get("/")
 def root():
-    return {"service": "GPT Cyber Content API", "status": "ok"}
+    return {"service": "GPT Cyber Content API", "status": "ok", "version": "0.2.0"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "openai_configured": bool(os.getenv("OPENAI_API_KEY"))}
+    return {"status": "ok", "openai_configured": bool(os.getenv("OPENAI_API_KEY")), "version": "0.2.0"}
 
 
 @app.post("/api/generate-content")
@@ -100,7 +102,7 @@ Requirements:
 - Make the writing practical and suitable for Instagram and LinkedIn.
 - Include a strong hook, concise caption, practical recommendations, CTA, SEO keywords, hashtags, and sources.
 - For Carousel, create exactly {req.slides} slides. For other formats create one visual block.
-- Keep slide text concise enough for a social design.
+- Each slide must have a distinct visual idea and concise text suitable for a social design.
 
 Return ONLY valid JSON in this exact structure:
 {{
@@ -116,11 +118,7 @@ Return ONLY valid JSON in this exact structure:
 }}
 """
 
-    kwargs = {
-        "model": model,
-        "input": prompt,
-        "store": False,
-    }
+    kwargs = {"model": model, "input": prompt, "store": False}
     if req.use_web_search:
         kwargs["tools"] = [{"type": "web_search"}]
 
@@ -142,12 +140,16 @@ def generate_image(req: ImageRequest):
     client = OpenAI(api_key=api_key)
     image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
     prompt = (
-        f"Create a social-media background visual for a {req.post_type}. "
-        f"Topic: {req.title}. {req.visual_direction}. "
-        "Do not include readable text, logos, watermarks, or UI. Leave clear negative space for Arabic RTL headline overlay."
+        f"Create the visual artwork for slide {req.slide_number} of a cybersecurity/GRC {req.post_type}. "
+        f"Slide headline concept: {req.title}. Supporting meaning: {req.body}. "
+        f"{req.visual_direction}. Use a sophisticated editorial infographic/cybersecurity visual language, "
+        "with a visual concept directly related to this specific slide rather than generic hacker imagery. "
+        "Use UAE-appropriate professional institutional visual cues when people or environments appear. "
+        "Do not include readable text, letters, logos, watermarks, UI screenshots, or brand marks. "
+        "Leave generous clean negative space suitable for an Arabic RTL headline and short body overlay."
     )
     try:
         result = client.images.generate(model=image_model, prompt=prompt, size="1024x1024")
-        return {"b64_json": result.data[0].b64_json}
+        return {"b64_json": result.data[0].b64_json, "slide_number": req.slide_number}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Image generation failed: {exc}")
