@@ -1,13 +1,20 @@
 (() => {
   const W = 1080, H = 1350;
 
+  // Keep Arabic in true RTL logical order while isolating English acronyms/standards.
+  // Examples: GRC, ISO 27001, NIST CSF, KPI, KRI remain LTR inside Arabic sentences.
+  function bidiSafe(text) {
+    return String(text || '').replace(/([A-Za-z][A-Za-z0-9./+&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9./+&_-]*)*)/g, '\u2066$1\u2069');
+  }
+
   function wrapText(ctx, text, maxWidth) {
     const words = String(text || '').split(/\s+/).filter(Boolean);
     const lines = [];
     let line = '';
     for (const word of words) {
-      const test = line ? word + ' ' + line : word;
-      if (ctx.measureText(test).width > maxWidth && line) {
+      // Preserve the original logical order. Canvas handles RTL rendering itself.
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(bidiSafe(test)).width > maxWidth && line) {
         lines.push(line);
         line = word;
       } else {
@@ -55,7 +62,6 @@
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext('2d');
 
-    // Artwork, cover crop into 4:5.
     const ir = img.naturalWidth / img.naturalHeight;
     const cr = W / H;
     let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
@@ -67,31 +73,30 @@
     ctx.textAlign = 'right';
     ctx.textBaseline = 'top';
 
-    // Headline readable area.
+    // Headline: true RTL, right aligned, Cairo, with isolated LTR acronyms.
     ctx.fillStyle = 'rgba(255,255,255,.90)';
     roundRect(ctx, 55, 55, 970, 235, 28); ctx.fill();
     ctx.fillStyle = '#0a2454';
     ctx.font = '800 54px Cairo, Arial, sans-serif';
     const hLines = wrapText(ctx, s.headline, 900).slice(0, 3);
-    hLines.forEach((line, n) => ctx.fillText(line, 970, 82 + n * 70));
+    hLines.forEach((line, n) => ctx.fillText(bidiSafe(line), 970, 82 + n * 70));
 
-    // Body card.
+    // Body: same RTL/LTR isolation rule.
     ctx.font = '600 31px Cairo, Arial, sans-serif';
     const bLines = wrapText(ctx, s.body, 500).slice(0, 6);
     const bodyH = 55 + bLines.length * 48;
     ctx.fillStyle = 'rgba(255,255,255,.88)';
     roundRect(ctx, 500, 330, 525, bodyH, 26); ctx.fill();
     ctx.fillStyle = '#172b48';
-    bLines.forEach((line, n) => ctx.fillText(line, 975, 355 + n * 48));
+    bLines.forEach((line, n) => ctx.fillText(bidiSafe(line), 975, 355 + n * 48));
 
-    // Footer identity.
+    // Footer identity uses explicit isolates for Latin segments.
     ctx.fillStyle = 'rgba(255,255,255,.92)';
     roundRect(ctx, 260, 1243, 705, 72, 20); ctx.fill();
     ctx.fillStyle = '#102b61';
     ctx.font = '700 27px Cairo, Arial, sans-serif';
-    ctx.fillText('نبض سيبراني | GRC | @cyberpulse_ar', 930, 1263);
+    ctx.fillText('نبض سيبراني | \u2066GRC\u2069 | \u2066@cyberpulse_ar\u2069', 930, 1263);
 
-    // Slide number fixed bottom-left.
     ctx.beginPath(); ctx.arc(95, 1278, 46, 0, Math.PI * 2); ctx.fillStyle = '#08295c'; ctx.fill();
     ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '800 34px Cairo, Arial, sans-serif'; ctx.fillText(String(s.number || index + 1), 95, 1278);
@@ -135,7 +140,17 @@
     }
   }
 
+  function applyRtlPreview() {
+    document.querySelectorAll('.overlay-head,.overlay-body,.overlay-footer').forEach(el => {
+      el.dir = 'rtl';
+      el.style.direction = 'rtl';
+      el.style.textAlign = 'right';
+      el.style.unicodeBidi = 'plaintext';
+    });
+  }
+
   function enhance() {
+    applyRtlPreview();
     document.querySelectorAll('.slide').forEach((card, index) => {
       const s = getSlide(index);
       const actions = card.querySelector('.slide-actions');
