@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.9.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.9.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -98,7 +98,7 @@ def web_app():return FileResponse(INDEX_FILE,media_type="text/html")
 @app.get("/mobile-download.js",include_in_schema=False)
 def mobile_js():return FileResponse(MOBILE_JS,media_type="application/javascript")
 @app.get("/health")
-def health():return {"status":"ok","version":"0.9.0","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_connected":bool(database_url()),"active_users":user_count(),"news_parser":"structured-v3"}
+def health():return {"status":"ok","version":"0.9.1","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_connected":bool(database_url()),"active_users":user_count(),"news_parser":"structured-v3","news_artwork":"text-free-editorial-v4"}
 @app.get("/api/archive")
 def archive_list():
     with db_conn() as c:return c.execute("SELECT id,topic_id,topic,domain,post_type,platform,content,created_at,updated_at FROM posts ORDER BY created_at DESC").fetchall()
@@ -128,34 +128,41 @@ def generate_content(req:ContentRequest):
 
 @app.post("/api/parse-news")
 def parse_news(req:NewsParseRequest):
-    """Turn pasted cybersecurity news into structured editorial fields and a visual brief."""
     if not os.getenv("OPENAI_API_KEY"):raise HTTPException(400,"OPENAI_API_KEY is not configured")
     client=OpenAI(api_key=os.getenv("OPENAI_API_KEY"));model=os.getenv("OPENAI_MODEL","gpt-5")
     prompt=f'''You are the editorial intelligence engine for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
-The user supplies a headline and a pasted news item. Parse ONLY supplied facts; do not invent or silently correct CVEs, dates, severity, vendors, sources or recommendations. Preserve uncertainty when a field is absent.
-
+Parse ONLY supplied facts. Never invent or silently correct CVEs, dates, severity, vendors, sources or recommendations.
 HEADLINE:\n{req.title}\n\nPASTED NEWS:\n{req.news}
-
-Return ONLY valid JSON with these keys:
-headline: concise Arabic headline suitable for the image, preserving the factual meaning.
-severity: one of "حرج", "عالي", "متوسط", "منخفض", or "" when absent.
-date: exact supplied date string or "".
-cve: exact CVE identifier(s) supplied, comma separated, or "".
-summary: concise Arabic news summary, 2-3 short sentences, no recommendations mixed in.
-recommendations: array containing only recommendations explicitly supplied by the user; concise wording.
-source: exact supplied source name or "".
-entities: array of important products/vendors/sectors/technologies explicitly mentioned.
-threat_type: concise category such as Privilege Escalation, Ransomware, Phishing, Data Breach, Cloud Vulnerability, Web Vulnerability, Identity/IAM, AI Security, Supply Chain, or another accurate category.
-visual_brief: English art direction for ONE editorial hero visual. Infer it from the factual topic. It must be specific to the affected technology and attack/risk mechanism, not generic cybersecurity. Examples: Azure/Active Directory privilege escalation -> enterprise identity-access environment, user/account nodes, access shield and a clear standard-to-elevated-privilege visual metaphor; WordPress vulnerability -> web application/server and WordPress-like publishing platform visual; phishing -> smartphone/email credential lure; ransomware -> enterprise endpoints/storage with locked-data metaphor; cloud issue -> cloud infrastructure and affected service metaphor. Never request hacker hoodies, masks, skulls, Matrix code, random binary or generic padlocks unless genuinely relevant.
-caption: polished Arabic social caption using only supplied facts. Include headline context, severity/date/CVE when present, summary, recommendations under "الإجراءات الموصى بها" when present, source when present, and @cyberpulse_ar. Do not fabricate hashtags or facts.
-'''
+Return ONLY valid JSON with: headline, severity (حرج/عالي/متوسط/منخفض/or empty), date, cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption.
+For visual_brief, describe ONE simple editorial metaphor specific to the affected technology and risk mechanism. The brief MUST NOT request or mention any visible words, product names, interface labels, UI screens, dashboards, diagrams, flowcharts, logos with text, letters or numbers. It should describe only visual objects and relationships. For privilege escalation use an abstract enterprise identity-access environment with a digital identity shield and a clear standard-access-to-elevated-access metaphor. Caption must use only supplied facts and include @cyberpulse_ar.'''
     try:return extract_json(client.responses.create(model=model,input=prompt,store=False).output_text)
     except Exception as e:raise HTTPException(500,f"News parsing failed: {e}")
 
 def visual_prompt(req:ImageRequest):
+    if req.visual_style=="Cyber Pulse":
+        return f'''Create ONLY the visual background artwork for a premium cybersecurity news post.
+FORMAT: vertical Instagram 4:5 portrait.
+BRAND VISUAL SYSTEM: deep black/dark navy #050B12, Cyber Blue #0A84FF, Cyan #00D1C7. Red only when the supplied risk is high/critical. Subtle circuit patterns, restrained digital grid, soft blue/cyan atmospheric glow. Premium enterprise cybersecurity media publication quality, sophisticated and minimal, never gaming-like.
+
+STRICT COMPOSITION:
+LEFT 35-40% ONLY: ONE large topic-specific editorial hero visual. Keep the important hero objects entirely on the left side.
+RIGHT 60-65%: intentionally EMPTY, clean, dark text-safe area. It must remain visually quiet for Arabic typography that the application overlays later. Do not put objects, icons, interfaces, diagrams, bright effects, decoration or focal details in this right-side text area. A very subtle dark background texture is acceptable.
+
+ABSOLUTE NO-TEXT RULE:
+Generate ZERO readable text. ZERO Arabic. ZERO English. ZERO words, letters, numbers, CVE identifiers, product names, UI labels, captions, headlines, hashtags, watermarks, signatures, brand names, pseudo-text or typographic logo marks. Do not write "Cyber Pulse". Do not write the affected vendor/product name. The application adds ALL typography and branding later.
+
+DO NOT CREATE:
+technical diagrams, flowcharts, dashboards, software interfaces, screenshots, browser windows, directory/user lists, tables, cards containing text, hacker hoodies, masks, skulls, Matrix code, random binary streams, generic warning posters, or cluttered compositions.
+
+STORY CONCEPT:
+{req.visual_direction}
+Concept context for visual understanding only: {req.title}. {req.body}
+Represent the story through ONE simple editorial visual metaphor, not a literal software UI. If the story involves identity or privilege escalation, visualize abstract enterprise identity nodes, a security/identity shield, and a clear visual transition from standard access to elevated privileged access using shapes, light, hierarchy or position — never usernames, role labels, directory screens or written UI.
+
+FINAL CHECK BEFORE RENDERING:
+The left side contains the editorial hero. The right side is mostly empty dark negative space. There is no readable text anywhere in the generated artwork. The result looks like a professional cybersecurity media background ready for separately overlaid Arabic news typography.'''
     common=f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, hashtags, watermarks or pseudo-text. Leave typography zones empty. {req.visual_direction}"
     if req.domain.strip().upper()=="GRC":style="Premium light government/enterprise GRC infographic artwork; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; polished enterprise vector/semi-3D icons; generous whitespace; no hacker clichés."
-    elif req.visual_style=="Cyber Pulse":style="Premium cybersecurity news artwork for Cyber Pulse: #050B12 dark navy/black, #0A84FF cyber blue, #00D1C7 cyan; red only for high/critical risk; subtle digital grid/circuit/HUD; ONE topic-specific hero visual on LEFT 35-40%; RIGHT 60-65% clean dark text-safe area; professional media publication, not gaming; no hoodie/mask/skull/Matrix clichés."
     elif req.visual_style=="Executive Minimal":style="Executive minimal artwork, white background, navy/blue, strong central metaphor, whitespace."
     else:style="Structured professional infographic artwork, light background, central concept and restrained supporting visuals."
     return style+"\n"+common
@@ -164,5 +171,5 @@ def generate_image(req:ImageRequest):
     if not os.getenv("OPENAI_API_KEY"):raise HTTPException(400,"OPENAI_API_KEY is not configured")
     try:
         r=OpenAI(api_key=os.getenv("OPENAI_API_KEY")).images.generate(model=os.getenv("OPENAI_IMAGE_MODEL","gpt-image-1"),prompt=visual_prompt(req),size="1024x1536")
-        return {"b64_json":r.data[0].b64_json,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False}
+        return {"b64_json":r.data[0].b64_json,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"text-free-editorial-v4"}
     except Exception as e:raise HTTPException(500,f"Image generation failed: {e}")
