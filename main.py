@@ -18,10 +18,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.8.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.8.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
+MOBILE_JS = BASE_DIR / "mobile-download.js"
 AUTH_EXEMPT_PATHS = {"/health"}
 
 class ContentRequest(BaseModel):
@@ -123,13 +124,19 @@ def extract_json(text):return json.loads(re.sub(r"^```json\s*|^```\s*|\s*```$","
 
 @app.get("/",include_in_schema=False)
 def web_app():return FileResponse(INDEX_FILE,media_type="text/html")
+
+@app.get("/mobile-download.js", include_in_schema=False)
+def mobile_download_script():
+    if not MOBILE_JS.exists(): raise HTTPException(404,"mobile-download.js not found")
+    return FileResponse(MOBILE_JS,media_type="application/javascript")
+
 @app.get("/health")
 def health():
     db_ok=False;users=0
     if database_url():
         try:init_db();users=user_count();db_ok=True
         except:pass
-    return {"status":"ok","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_configured":bool(database_url()),"database_connected":db_ok,"auth_enabled":users>0,"active_users":users,"version":"0.8.0","web_ui":INDEX_FILE.exists(),"grc_template":"Cyber Pulse GRC","image_text_mode":"overlay-only"}
+    return {"status":"ok","openai_configured":bool(os.getenv("OPENAI_API_KEY")),"database_configured":bool(database_url()),"database_connected":db_ok,"auth_enabled":users>0,"active_users":users,"version":"0.8.1","web_ui":INDEX_FILE.exists(),"mobile_download":MOBILE_JS.exists(),"grc_template":"Cyber Pulse GRC","image_text_mode":"overlay-only"}
 @app.get("/api/archive")
 def archive_list():
     with db_conn() as conn:return conn.execute("SELECT id,topic_id,topic,domain,post_type,platform,content,created_at,updated_at FROM posts ORDER BY created_at DESC").fetchall()
