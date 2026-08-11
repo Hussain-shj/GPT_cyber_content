@@ -6,12 +6,14 @@ import os
 import re
 import secrets
 import uuid
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Any
 from urllib.parse import urlparse
 
 import psycopg
+import httpx
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.12.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.13.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -56,6 +58,14 @@ class NewsSearchRequest(BaseModel):
     days: int = Field(default=7, ge=1, le=30)
     limit: int = Field(default=8, ge=1, le=12)
 
+class NewsVideoRequest(BaseModel):
+    headline: str = Field(min_length=3, max_length=500)
+    summary: str = Field(min_length=10, max_length=3000)
+    threat_type: str = Field(default="خبر سيبراني", max_length=200)
+    visual_brief: str = Field(default="", max_length=2000)
+    style: Literal["Breaking News", "Cyber Awareness", "GRC"] = "Breaking News"
+    duration: Literal[5, 10, 15] = 5
+
 class ArchivePost(BaseModel):
     id: str | None = None
     topic_id: int | None = None
@@ -66,6 +76,9 @@ class ArchivePost(BaseModel):
     content: dict[str, Any]
 
 def database_url(): return os.getenv("DATABASE_URL")
+
+VIDEO_JOBS: dict[str, dict[str, Any]] = {}
+VIDEO_JOBS_LOCK = threading.Lock()
 def db_conn():
     if not database_url(): raise HTTPException(503, "DATABASE_URL is not configured")
     return psycopg.connect(database_url(), row_factory=dict_row)
@@ -170,10 +183,66 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.12.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.13.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
-        "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources())
+        "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
+        "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "ali-vilab/text-to-video-ms-1.7b")
     }
+
+def _video_url(output: Any) -> str:
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list) and output:
+        return _video_url(output[0])
+    if isinstance(output, dict):
+        for key in ("url", "video_url", "video", "output"):
+            if output.get(key):
+                return _video_url(output[key])
+    raise ValueError("Bytez returned no playable video URL")
+
+def _run_video_job(job_id: str, req: NewsVideoRequest):
+    model = os.getenv("BYTEZ_VIDEO_MODEL", "ali-vilab/text-to-video-ms-1.7b").strip()
+    prompt = f'''Create a premium vertical 9:16 editorial cybersecurity video for CYBER PULSE.
+Topic: {req.headline}
+Factual context: {req.summary}
+Threat category: {req.threat_type}
+Visual direction: {req.visual_brief or "abstract digital security environment"}
+Style: {req.style}. Target duration: approximately {req.duration} seconds.
+Use dark navy and black with cyan and cyber blue highlights. Use elegant cinematic movement, realistic lighting, and one coherent scene. Do not show readable text, letters, numbers, captions, logos, watermarks, dashboards, or distorted interfaces. Do not depict graphic violence or panic.'''
+    try:
+        with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
+            response = client.post(
+                f"https://api.bytez.com/models/v2/{model}",
+                headers={"Authorization": os.environ["BYTEZ_API_KEY"], "Content-Type":"application/json"},
+                json={"text": prompt},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if error: raise ValueError(str(error))
+        output = payload.get("output", payload) if isinstance(payload, dict) else payload
+        result = {"status":"completed", "video_url":_video_url(output), "model":model, "completed_at":datetime.now(timezone.utc).isoformat()}
+    except Exception as exc:
+        result = {"status":"failed", "detail":str(exc)[:1000], "model":model, "completed_at":datetime.now(timezone.utc).isoformat()}
+    with VIDEO_JOBS_LOCK:
+        VIDEO_JOBS[job_id].update(result)
+
+@app.post("/api/news-video", status_code=202)
+def create_news_video(req: NewsVideoRequest):
+    if not os.getenv("BYTEZ_API_KEY"): raise HTTPException(400, "BYTEZ_API_KEY is not configured")
+    job_id = str(uuid.uuid4())
+    with VIDEO_JOBS_LOCK:
+        VIDEO_JOBS[job_id] = {"id":job_id, "status":"processing", "created_at":datetime.now(timezone.utc).isoformat()}
+    threading.Thread(target=_run_video_job, args=(job_id, req), daemon=True).start()
+    return VIDEO_JOBS[job_id]
+
+@app.get("/api/news-video/{job_id}")
+def news_video_status(job_id: str):
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        if not job: raise HTTPException(404, "Video job not found or the service was restarted")
+        return dict(job)
 
 @app.get("/api/news-sources")
 def news_sources(): return {"count":len(load_cyber_sources()), "sources":load_cyber_sources()}

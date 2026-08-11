@@ -18,6 +18,8 @@ AI content studio for cybersecurity, GRC, AI governance and privacy content.
 4. Optional variables:
    - `OPENAI_MODEL=gpt-5`
    - `OPENAI_IMAGE_MODEL=gpt-image-1`
+   - `BYTEZ_API_KEY` to enable cybersecurity news video generation
+   - `BYTEZ_VIDEO_MODEL=ali-vilab/text-to-video-ms-1.7b` to override the default Bytez model
 5. Deploy and generate a public Railway domain.
 6. Test `/health` on the Railway domain.
 
@@ -36,5 +38,7 @@ The OpenAI API key must never be placed in `index.html`. Keep it in Railway Vari
 - `GET /health`
 - `POST /api/generate-content`
 - `POST /api/generate-image`
+- `POST /api/news-video`
+- `GET /api/news-video/{job_id}`
 
 If `OPENAI_API_KEY` is missing, content generation returns Demo Mode so the UI can still be tested.

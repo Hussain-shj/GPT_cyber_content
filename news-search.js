@@ -168,6 +168,7 @@
     if (!panel || !field || !latestPost) return;
     field.value = latestPost;
     panel.classList.remove('hidden');
+    window.dispatchEvent(new CustomEvent('cyberpulse:news-ready', {detail:data}));
   }
 
   window.fetch = async (...args) => {
@@ -183,4 +184,103 @@
   observer.observe(document.documentElement, {childList:true, subtree:true});
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensurePanel);
   else ensurePanel();
+})();
+
+/* Bytez text-to-video option */
+(() => {
+  let latestNews = null;
+  let pollTimer = null;
+
+  function ensureVideoPanel() {
+    const news = document.getElementById('news');
+    if (!news || document.getElementById('newsVideoPanel')) return;
+    const panel = document.createElement('div');
+    panel.id = 'newsVideoPanel';
+    panel.className = 'news-video-panel hidden';
+    panel.innerHTML = `
+      <div class="news-video-head">
+        <div><h3>إنشاء فيديو للخبر</h3><p>فيديو بصري بدون نصوص؛ مناسب كخلفية Reels أو LinkedIn.</p></div>
+      </div>
+      <div class="news-video-options">
+        <label>القالب<select id="newsVideoStyle"><option value="Breaking News">خبر عاجل</option><option value="Cyber Awareness">توعية سيبرانية</option><option value="GRC">GRC</option></select></label>
+        <label>المدة التقريبية<select id="newsVideoDuration"><option value="5">5 ثوانٍ</option><option value="10">10 ثوانٍ</option><option value="15">15 ثانية</option></select></label>
+      </div>
+      <button id="newsGenerateVideo" class="action">🎬 إنشاء الفيديو عبر Bytez</button>
+      <div id="newsVideoStatus" class="status"></div>
+      <div id="newsVideoResult"></div>`;
+    news.appendChild(panel);
+    const style = document.createElement('style');
+    style.textContent = `
+      .news-video-panel{max-width:920px;margin:18px auto 0;padding:16px;background:#081827;border:1px solid #294760;border-radius:14px}
+      .news-video-head h3{margin:0}.news-video-head p{margin:4px 0 12px;color:#9eb2c9;font-size:12px}
+      .news-video-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+      .news-video-result{margin-top:12px}.news-video-result video{display:block;width:min(100%,430px);aspect-ratio:9/16;object-fit:cover;background:#02070c;border-radius:14px}
+      .news-video-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.news-video-actions a{display:inline-block;text-decoration:none}
+      @media(max-width:640px){.news-video-options{grid-template-columns:1fr}}`;
+    document.head.appendChild(style);
+    document.getElementById('newsGenerateVideo').onclick = generateVideo;
+  }
+
+  async function generateVideo() {
+    if (!latestNews) return;
+    const btn = document.getElementById('newsGenerateVideo');
+    const status = document.getElementById('newsVideoStatus');
+    const result = document.getElementById('newsVideoResult');
+    btn.disabled = true;
+    result.innerHTML = '';
+    status.textContent = 'بدأ توليد الفيديو. قد تستغرق العملية عدة دقائق...';
+    try {
+      const response = await fetch('/api/news-video', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+        headline:latestNews.headline,
+        summary:latestNews.summary,
+        threat_type:latestNews.threat_type || 'خبر سيبراني',
+        visual_brief:latestNews.visual_brief || '',
+        style:document.getElementById('newsVideoStyle').value,
+        duration:Number(document.getElementById('newsVideoDuration').value)
+      })});
+      const job = await response.json();
+      if (!response.ok) throw new Error(job.detail || 'تعذر بدء توليد الفيديو');
+      poll(job.id);
+    } catch (error) {
+      status.textContent = 'خطأ: ' + error.message;
+      btn.disabled = false;
+    }
+  }
+
+  async function poll(jobId) {
+    clearTimeout(pollTimer);
+    const status = document.getElementById('newsVideoStatus');
+    const btn = document.getElementById('newsGenerateVideo');
+    try {
+      const response = await fetch('/api/news-video/' + encodeURIComponent(jobId));
+      const job = await response.json();
+      if (!response.ok) throw new Error(job.detail || 'تعذر قراءة حالة الفيديو');
+      if (job.status === 'processing') {
+        status.textContent = 'Bytez يعالج الفيديو الآن... يمكنك إبقاء الصفحة مفتوحة.';
+        pollTimer = setTimeout(() => poll(jobId), 5000);
+        return;
+      }
+      btn.disabled = false;
+      if (job.status === 'failed') throw new Error(job.detail || 'فشل توليد الفيديو');
+      status.textContent = 'تم إنشاء الفيديو بنجاح.';
+      const url = String(job.video_url || '');
+      const safeUrl = /^https:\/\//i.test(url) || /^data:video\//i.test(url) ? url : '';
+      if (!safeUrl) throw new Error('لم يُرجع Bytez رابط فيديو صالحًا');
+      document.getElementById('newsVideoResult').innerHTML = `<div class="news-video-result"><video controls playsinline src="${safeUrl.replace(/"/g,'&quot;')}"></video><div class="news-video-actions"><a class="action secondary" href="${safeUrl.replace(/"/g,'&quot;')}" target="_blank" rel="noopener">فتح / تنزيل MP4</a><button class="action secondary" id="newsVideoAgain">إنشاء نسخة أخرى</button></div></div>`;
+      document.getElementById('newsVideoAgain').onclick = generateVideo;
+    } catch (error) {
+      clearTimeout(pollTimer);
+      status.textContent = 'خطأ: ' + error.message;
+      btn.disabled = false;
+    }
+  }
+
+  window.addEventListener('cyberpulse:news-ready', event => {
+    latestNews = event.detail;
+    ensureVideoPanel();
+    document.getElementById('newsVideoPanel')?.classList.remove('hidden');
+  });
+  const observer = new MutationObserver(ensureVideoPanel);
+  observer.observe(document.documentElement, {childList:true, subtree:true});
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensureVideoPanel); else ensureVideoPanel();
 })();
