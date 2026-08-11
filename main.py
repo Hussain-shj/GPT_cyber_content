@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.10.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.11.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -170,7 +170,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.10.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.11.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources())
     }
@@ -272,8 +272,10 @@ def parse_news(req: NewsParseRequest):
     prompt = f'''You are the editorial intelligence engine for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
 Parse ONLY supplied facts. Never invent or silently correct CVEs, dates, severity, vendors, sources or recommendations.
 HEADLINE:\n{req.title}\n\nPASTED NEWS:\n{req.news}
-Return ONLY valid JSON with: headline, severity (حرج/عالي/متوسط/منخفض/or empty), date, cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption.
-For visual_brief, describe ONE simple editorial metaphor specific to the affected technology and risk mechanism. The brief MUST NOT request visible words, product names, interface labels, UI screens, dashboards, diagrams, flowcharts, logos with text, letters or numbers. It should describe only visual objects and relationships. Caption must use only supplied facts and include @cyberpulse_ar.'''
+Return ONLY valid JSON with: headline, severity (حرج/عالي/متوسط/منخفض/or empty), date, cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption, hashtags.
+For visual_brief, describe ONE simple editorial metaphor specific to the affected technology and risk mechanism. The brief MUST NOT request visible words, product names, interface labels, UI screens, dashboards, diagrams, flowcharts, logos with text, letters or numbers. It should describe only visual objects and relationships.
+Caption must be a polished, self-contained Arabic social post of 120-220 words, based only on supplied facts. Include the event, affected product or sector, impact, and supplied recommendations when present. End with a concise engagement question or call to action and @cyberpulse_ar. Do not put hashtags inside caption.
+Hashtags must be a JSON array of 6-10 concise Arabic or English hashtags relevant to the supplied story, each beginning with #. Always include #نبض_سيبراني and #الأمن_السيبراني.'''
     try: return extract_json(client.responses.create(model=model, input=prompt, store=False).output_text)
     except Exception as e: raise HTTPException(500, f"News parsing failed: {e}")
 
