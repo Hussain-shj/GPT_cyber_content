@@ -131,8 +131,8 @@
     panel.className = 'news-post-panel hidden';
     panel.innerHTML = `
       <div class="news-post-head">
-        <h3>نص المحتوى والهاشتاقات</h3>
-        <button id="newsCopyPost" class="copy-btn">نسخ المحتوى والهاشتاقات</button>
+        <h3>نص جاهز للينكدإن وإنستغرام</h3>
+        <button id="newsCopyPost" class="copy-btn">نسخ النص والهاشتاقات</button>
       </div>
       <textarea id="newsPostText" rows="12" readonly></textarea>`;
     news.appendChild(panel);
@@ -156,7 +156,7 @@
         field.select();
         document.execCommand('copy');
       }
-      if (status) status.textContent = 'تم نسخ المحتوى والهاشتاقات.';
+      if (status) status.textContent = 'تم نسخ النص المنسق والهاشتاقات.';
     };
   }
 
