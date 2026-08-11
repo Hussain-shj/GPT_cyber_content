@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.13.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.13.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,11 +183,11 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.13.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.13.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
-        "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "ali-vilab/text-to-video-ms-1.7b")
+        "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
     }
 
 def _video_url(output: Any) -> str:
@@ -201,8 +201,34 @@ def _video_url(output: Any) -> str:
                 return _video_url(output[key])
     raise ValueError("Bytez returned no playable video URL")
 
+def _available_bytez_video_models(client: httpx.Client) -> list[str]:
+    response = client.get(
+        "https://api.bytez.com/models/v2/list/models",
+        headers={"Authorization": os.environ["BYTEZ_API_KEY"]},
+        params={"task": "text-to-video"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, dict) and payload.get("error"):
+        raise ValueError(str(payload["error"]))
+    rows = payload.get("output", []) if isinstance(payload, dict) else []
+    return [
+        str(row["modelId"]).strip()
+        for row in rows
+        if isinstance(row, dict) and row.get("task") == "text-to-video" and row.get("modelId")
+    ]
+
+def _select_bytez_video_model(client: httpx.Client) -> str:
+    configured = os.getenv("BYTEZ_VIDEO_MODEL", "").strip()
+    models = _available_bytez_video_models(client)
+    if configured and configured in models:
+        return configured
+    if models:
+        return models[0]
+    raise ValueError("لا يوجد نموذج text-to-video متاح حاليًا في حساب Bytez")
+
 def _run_video_job(job_id: str, req: NewsVideoRequest):
-    model = os.getenv("BYTEZ_VIDEO_MODEL", "ali-vilab/text-to-video-ms-1.7b").strip()
+    model = os.getenv("BYTEZ_VIDEO_MODEL", "automatic").strip() or "automatic"
     prompt = f'''Create a premium vertical 9:16 editorial cybersecurity video for CYBER PULSE.
 Topic: {req.headline}
 Factual context: {req.summary}
@@ -212,6 +238,7 @@ Style: {req.style}. Target duration: approximately {req.duration} seconds.
 Use dark navy and black with cyan and cyber blue highlights. Use elegant cinematic movement, realistic lighting, and one coherent scene. Do not show readable text, letters, numbers, captions, logos, watermarks, dashboards, or distorted interfaces. Do not depict graphic violence or panic.'''
     try:
         with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
+            model = _select_bytez_video_model(client)
             response = client.post(
                 f"https://api.bytez.com/models/v2/{model}",
                 headers={"Authorization": os.environ["BYTEZ_API_KEY"], "Content-Type":"application/json"},
