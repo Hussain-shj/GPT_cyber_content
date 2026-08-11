@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.13.2")
+app = FastAPI(title="GPT Cyber Content API", version="0.13.3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,7 +183,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.13.2", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.13.3", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
@@ -210,7 +210,11 @@ def _available_bytez_video_models(client: httpx.Client) -> list[str]:
     payload = response.json()
     if isinstance(payload, dict) and payload.get("error"):
         raise ValueError(str(payload["error"]))
-    rows = payload.get("output", []) if isinstance(payload, dict) else []
+    rows = payload.get("output", payload.get("models", [])) if isinstance(payload, dict) else payload
+    if isinstance(rows, dict):
+        rows = rows.get("models", rows.get("items", rows.get("data", [])))
+    if not isinstance(rows, list):
+        rows = []
     models = []
     for row in rows:
         if not isinstance(row, dict):
@@ -222,13 +226,23 @@ def _available_bytez_video_models(client: httpx.Client) -> list[str]:
             models.append(str(model_id).strip())
     return models
 
-def _select_bytez_video_model(client: httpx.Client) -> str:
+UNAVAILABLE_BYTEZ_VIDEO_MODELS = {"ali-vilab/text-to-video-ms-1.7b"}
+
+def _bytez_video_candidates(client: httpx.Client) -> list[str]:
     configured = os.getenv("BYTEZ_VIDEO_MODEL", "").strip()
-    if configured:
-        return configured
     models = _available_bytez_video_models(client)
-    if models:
-        return models[0]
+    candidates = ([configured] if configured else []) + models
+    unique = []
+    for model in candidates:
+        if model and model not in UNAVAILABLE_BYTEZ_VIDEO_MODELS and model not in unique:
+            unique.append(model)
+    if unique:
+        return unique
+    if configured in UNAVAILABLE_BYTEZ_VIDEO_MODELS:
+        raise ValueError(
+            "نموذج BYTEZ_VIDEO_MODEL المحدد لم يعد متاحًا. احذف المتغير من Railway "
+            "أو استبدله بمعرّف text-to-video ظاهر حاليًا في حساب Bytez."
+        )
     raise ValueError("لا يوجد نموذج text-to-video متاح حاليًا في حساب Bytez")
 
 def _run_video_job(job_id: str, req: NewsVideoRequest):
@@ -242,14 +256,25 @@ Style: {req.style}. Target duration: approximately {req.duration} seconds.
 Use dark navy and black with cyan and cyber blue highlights. Use elegant cinematic movement, realistic lighting, and one coherent scene. Do not show readable text, letters, numbers, captions, logos, watermarks, dashboards, or distorted interfaces. Do not depict graphic violence or panic.'''
     try:
         with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
-            model = _select_bytez_video_model(client)
-            response = client.post(
-                f"https://api.bytez.com/models/v2/{model}",
-                headers={"Authorization": os.environ["BYTEZ_API_KEY"], "Content-Type":"application/json"},
-                json={"text": prompt},
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = None
+            failures = []
+            for model in _bytez_video_candidates(client):
+                response = client.post(
+                    f"https://api.bytez.com/models/v2/{model}",
+                    headers={"Authorization": os.environ["BYTEZ_API_KEY"], "Content-Type":"application/json"},
+                    json={"text": prompt},
+                )
+                if response.status_code == 404:
+                    failures.append(model)
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                break
+            if payload is None:
+                raise ValueError(
+                    "نماذج Bytez التالية غير متاحة (404): " + ", ".join(failures)
+                    + ". اختر نموذج text-to-video متاحًا من لوحة Bytez."
+                )
         error = payload.get("error") if isinstance(payload, dict) else None
         if error: raise ValueError(str(error))
         output = payload.get("output", payload) if isinstance(payload, dict) else payload
