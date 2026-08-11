@@ -19,7 +19,7 @@ AI content studio for cybersecurity, GRC, AI governance and privacy content.
    - `OPENAI_MODEL=gpt-5`
    - `OPENAI_IMAGE_MODEL=gpt-image-1`
    - `BYTEZ_API_KEY` to enable cybersecurity news video generation
-   - `BYTEZ_VIDEO_MODEL=ali-vilab/text-to-video-ms-1.7b` to override the default Bytez model
+   - `BYTEZ_VIDEO_MODEL` is optional. If omitted, the app automatically selects an available Bytez `text-to-video` model. Set it only to a model ID returned for your Bytez account.
 5. Deploy and generate a public Railway domain.
 6. Test `/health` on the Railway domain.
 
