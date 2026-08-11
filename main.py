@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.13.1")
+app = FastAPI(title="GPT Cyber Content API", version="0.13.2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,7 +183,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.13.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.13.2", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
@@ -205,24 +205,28 @@ def _available_bytez_video_models(client: httpx.Client) -> list[str]:
     response = client.get(
         "https://api.bytez.com/models/v2/list/models",
         headers={"Authorization": os.environ["BYTEZ_API_KEY"]},
-        params={"task": "text-to-video"},
     )
     response.raise_for_status()
     payload = response.json()
     if isinstance(payload, dict) and payload.get("error"):
         raise ValueError(str(payload["error"]))
     rows = payload.get("output", []) if isinstance(payload, dict) else []
-    return [
-        str(row["modelId"]).strip()
-        for row in rows
-        if isinstance(row, dict) and row.get("task") == "text-to-video" and row.get("modelId")
-    ]
+    models = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        task = row.get("task", row.get("tasks", ""))
+        tasks = task if isinstance(task, list) else [task]
+        model_id = row.get("modelId", row.get("id", row.get("model")))
+        if model_id and "text-to-video" in tasks:
+            models.append(str(model_id).strip())
+    return models
 
 def _select_bytez_video_model(client: httpx.Client) -> str:
     configured = os.getenv("BYTEZ_VIDEO_MODEL", "").strip()
-    models = _available_bytez_video_models(client)
-    if configured and configured in models:
+    if configured:
         return configured
+    models = _available_bytez_video_models(client)
     if models:
         return models[0]
     raise ValueError("لا يوجد نموذج text-to-video متاح حاليًا في حساب Bytez")
