@@ -107,3 +107,80 @@
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
+
+/* Publish-ready news copy with hashtags */
+(() => {
+  let latestPost = '';
+  const originalFetch = window.fetch.bind(window);
+
+  function buildPost(data) {
+    const fallback = [data.headline, data.summary, '@cyberpulse_ar'].filter(Boolean).join('\n\n');
+    const hashtags = (data.hashtags || [])
+      .map(tag => String(tag).trim())
+      .filter(Boolean)
+      .map(tag => tag.startsWith('#') ? tag : '#' + tag.replace(/^#+/, ''))
+      .join(' ');
+    return [data.caption || fallback, hashtags].filter(Boolean).join('\n\n');
+  }
+
+  function ensurePanel() {
+    const news = document.getElementById('news');
+    if (!news || document.getElementById('newsPostPanel')) return;
+    const panel = document.createElement('div');
+    panel.id = 'newsPostPanel';
+    panel.className = 'news-post-panel hidden';
+    panel.innerHTML = `
+      <div class="news-post-head">
+        <h3>نص المحتوى والهاشتاقات</h3>
+        <button id="newsCopyPost" class="copy-btn">نسخ المحتوى والهاشتاقات</button>
+      </div>
+      <textarea id="newsPostText" rows="12" readonly></textarea>`;
+    news.appendChild(panel);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      .news-post-panel{max-width:920px;margin:22px auto 0;padding:16px;background:#081827;border:1px solid #294760;border-radius:14px}
+      .news-post-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+      .news-post-head h3{margin:0}
+      .news-post-panel textarea{margin-top:12px;min-height:230px;line-height:1.9;direction:rtl;text-align:right;resize:vertical;background:#050f1b}`;
+    document.head.appendChild(style);
+
+    document.getElementById('newsCopyPost').onclick = async () => {
+      if (!latestPost) return;
+      const status = document.getElementById('newsMsg');
+      try {
+        await navigator.clipboard.writeText(latestPost);
+      } catch {
+        const field = document.getElementById('newsPostText');
+        field.focus();
+        field.select();
+        document.execCommand('copy');
+      }
+      if (status) status.textContent = 'تم نسخ المحتوى والهاشتاقات.';
+    };
+  }
+
+  function showPost(data) {
+    ensurePanel();
+    latestPost = buildPost(data);
+    const panel = document.getElementById('newsPostPanel');
+    const field = document.getElementById('newsPostText');
+    if (!panel || !field || !latestPost) return;
+    field.value = latestPost;
+    panel.classList.remove('hidden');
+  }
+
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    if (url.includes('/api/parse-news') && response.ok) {
+      response.clone().json().then(showPost).catch(() => {});
+    }
+    return response;
+  };
+
+  const observer = new MutationObserver(ensurePanel);
+  observer.observe(document.documentElement, {childList:true, subtree:true});
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensurePanel);
+  else ensurePanel();
+})();
