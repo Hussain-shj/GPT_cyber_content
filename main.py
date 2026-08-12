@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.15.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.15.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,7 +183,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.15.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.15.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"vision-reviewed-v6", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
@@ -417,6 +417,10 @@ Hashtags must be a JSON array of 6-10 concise Arabic or English hashtags relevan
 
 def visual_prompt(req: ImageRequest):
     if req.visual_style == "Cyber Pulse":
+        story = f"{req.title} {req.body} {req.visual_direction}".lower()
+        zoom_contract = ""
+        if "zoom" in story or "زووم" in story:
+            zoom_contract = '''\nMANDATORY ZOOM ANNOTATION VISUAL CONTRACT: show a recognizable modern video-meeting scene with several participant tiles; a shared-screen canvas; a clearly visible annotation pen/drawing stroke/cursor acting on that shared canvas; and an unauthorized-control path spreading from the annotated shared screen toward two or more participant laptops/devices. Use red only for the hostile control path and cyan/blue for the legitimate meeting. A generic laptop, generic participant grid, large arrow, isolated user icon, update window, download screen, or single-device warning is NOT sufficient. Do not generate readable Zoom text or logos; communicate the platform through its familiar blue video-meeting visual language and meeting layout.\n'''
         return f'''Create ONLY the visual background artwork for a premium cybersecurity news post. Before composing, identify the exact subject, affected technology/vendor category, event, and risk mechanism from the supplied title, context, and visual direction.
 FORMAT: vertical Instagram 4:5 portrait.
 BRAND VISUAL SYSTEM: deep black/dark navy #050B12, Cyber Blue #0A84FF, Cyan #00D1C7. Red only when the supplied risk is high/critical. Subtle circuit patterns, restrained digital grid, soft blue/cyan atmospheric glow. Premium enterprise cybersecurity media publication quality, sophisticated and minimal, never gaming-like.
@@ -428,6 +432,7 @@ DO NOT CREATE flowcharts, generic dashboards unrelated to the story, browser dir
 DIRECT VISUAL BRIEF: {req.visual_direction}
 NEWS TITLE: {req.title}
 FACTUAL CONTEXT: {req.body}
+{zoom_contract}
 Final self-check before rendering: would a viewer identify the technology and event without reading the headline? If not, revise the scene to be more direct and topic-specific.'''
     common = f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, hashtags, watermarks or pseudo-text. Leave typography zones empty. {req.visual_direction}"
     if req.domain.strip().upper() == "GRC": style = "Premium light government/enterprise GRC infographic artwork; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; polished enterprise vector/semi-3D icons; generous whitespace; no hacker clichés."
@@ -438,6 +443,7 @@ Final self-check before rendering: would a viewer identify the technology and ev
 def review_artwork(client: OpenAI, req: ImageRequest, image_b64: str):
     review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
 Evaluate the supplied generated artwork against the factual news context. Review the IMAGE itself, not merely the prompt.
+Use ONLY the supplied news title, factual context, and required visual direction. Never require an object, screen, feature, update window, download, patch, vendor, or attack step that is not supported by this specific story. Do not carry requirements from another cybersecurity story.
 
 NEWS TITLE: {req.title}
 FACTUAL CONTEXT: {req.body}
@@ -451,7 +457,7 @@ Score these criteria:
 5. The upper 35-40% remains usable for Arabic headline and metadata, and the top-right has safe logo space.
 6. There is no readable generated text, pseudo-text, watermark, distorted typography, hacker hoodie, or unrelated clutter.
 
-For Zoom Annotation / screen-sharing takeover stories specifically, a strong image should clearly show a video meeting or screen-share session, an annotation/drawing tool acting on the shared screen, and unauthorized control or device takeover crossing from one participant/session to another. A generic laptop, generic meeting grid, arrow, or user icon alone is insufficient.
+For Zoom Annotation / screen-sharing takeover stories specifically, a strong image should clearly show a video meeting with several participants, a shared-screen canvas, an annotation pen/drawing stroke/cursor acting on that shared screen, and unauthorized control spreading from the annotated screen toward two or more participant devices. A generic laptop, generic meeting grid, arrow, user icon, software-update window, or download screen is insufficient and must not be requested.
 
 Return ONLY valid JSON:
 {{"semantic_match":true,"score":0,"technology_visible":true,"mechanism_visible":true,"composition_ok":true,"issues":["concise issue"],"retry_direction":"specific English correction prompt for the image generator","summary_ar":"سطر عربي مختصر يشرح نتيجة المراجعة"}}
@@ -480,21 +486,28 @@ def generate_image(req: ImageRequest):
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         base_prompt = visual_prompt(req)
         image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-        image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
-        attempts = 1
+        max_attempts = max(1, min(4, int(os.getenv("IMAGE_MAX_ATTEMPTS", "3"))))
+        generation_prompt = base_prompt
+        image_b64 = ""
+        attempts = 0
         try:
-            review = review_artwork(client, req, image_b64)
-            if not review["semantic_match"]:
+            review = None
+            while attempts < max_attempts:
+                image_b64 = client.images.generate(model=image_model, prompt=generation_prompt, size="1024x1536").data[0].b64_json
+                attempts += 1
+                review = review_artwork(client, req, image_b64)
+                if review["semantic_match"] or attempts >= max_attempts:
+                    break
                 correction = str(review.get("retry_direction", "")).strip()
-                retry_prompt = base_prompt + f'''\n\nTHE FIRST IMAGE WAS REJECTED BY VISUAL QUALITY CONTROL.
+                generation_prompt = base_prompt + f'''\n\nTHE PREVIOUS IMAGE WAS REJECTED BY VISUAL QUALITY CONTROL.
 REVIEW SCORE: {review['score']}/100.
 REJECTION ISSUES: {json.dumps(review.get('issues', []), ensure_ascii=False)}
 MANDATORY CORRECTION: {correction or "Make the affected technology and exact attack mechanism unmistakable; remove generic or unrelated elements."}
-Create a substantially improved second composition, not a minor variation.'''
-                image_b64 = client.images.generate(model=image_model, prompt=retry_prompt, size="1024x1536").data[0].b64_json
-                attempts = 2
-                review = review_artwork(client, req, image_b64)
+Create a substantially different and improved composition, not a minor variation. Follow only the current story; do not introduce update or download imagery unless explicitly present in the news.'''
         except Exception as review_error:
+            if not image_b64:
+                image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
+                attempts += 1
             review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
         return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"vision-reviewed-v6","generation_attempts":attempts,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
