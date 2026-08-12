@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.14.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.15.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,9 +183,9 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.14.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.15.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
-        "news_artwork":"semantic-direct-v5", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "news_artwork":"vision-reviewed-v6", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
     }
@@ -435,10 +435,66 @@ Final self-check before rendering: would a viewer identify the technology and ev
     else: style = "Structured professional infographic artwork, light background, central concept and restrained supporting visuals."
     return style + "\n" + common
 
+def review_artwork(client: OpenAI, req: ImageRequest, image_b64: str):
+    review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
+Evaluate the supplied generated artwork against the factual news context. Review the IMAGE itself, not merely the prompt.
+
+NEWS TITLE: {req.title}
+FACTUAL CONTEXT: {req.body}
+REQUIRED VISUAL DIRECTION: {req.visual_direction}
+
+Score these criteria:
+1. The affected technology/vendor/product category is immediately identifiable without headline text.
+2. The reported event or attack mechanism is visually clear and technically relevant.
+3. Every prominent object is traceable to the supplied story; there are no loose or misleading metaphors.
+4. The scene has premium Cyber Pulse editorial quality: dark navy, cyan/teal, restrained risk red, clean and professional.
+5. The upper 35-40% remains usable for Arabic headline and metadata, and the top-right has safe logo space.
+6. There is no readable generated text, pseudo-text, watermark, distorted typography, hacker hoodie, or unrelated clutter.
+
+For Zoom Annotation / screen-sharing takeover stories specifically, a strong image should clearly show a video meeting or screen-share session, an annotation/drawing tool acting on the shared screen, and unauthorized control or device takeover crossing from one participant/session to another. A generic laptop, generic meeting grid, arrow, or user icon alone is insufficient.
+
+Return ONLY valid JSON:
+{{"semantic_match":true,"score":0,"technology_visible":true,"mechanism_visible":true,"composition_ok":true,"issues":["concise issue"],"retry_direction":"specific English correction prompt for the image generator","summary_ar":"سطر عربي مختصر يشرح نتيجة المراجعة"}}
+Set semantic_match=true only when score is at least 78 and both technology_visible and mechanism_visible are true.'''
+    response = client.responses.create(
+        model=os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-5")),
+        input=[{"role":"user","content":[
+            {"type":"input_text","text":review_prompt},
+            {"type":"input_image","image_url":f"data:image/png;base64,{image_b64}"},
+        ]}],
+        store=False,
+    )
+    review = extract_json(response.output_text)
+    score = max(0, min(100, int(review.get("score", 0))))
+    review["score"] = score
+    review["semantic_match"] = bool(
+        review.get("semantic_match") and score >= 78
+        and review.get("technology_visible") and review.get("mechanism_visible")
+    )
+    return review
+
 @app.post("/api/generate-image")
 def generate_image(req: ImageRequest):
     if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
     try:
-        r = OpenAI(api_key=os.getenv("OPENAI_API_KEY")).images.generate(model=os.getenv("OPENAI_IMAGE_MODEL","gpt-image-1"), prompt=visual_prompt(req), size="1024x1536")
-        return {"b64_json":r.data[0].b64_json,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"semantic-direct-v5"}
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        base_prompt = visual_prompt(req)
+        image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+        image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
+        attempts = 1
+        try:
+            review = review_artwork(client, req, image_b64)
+            if not review["semantic_match"]:
+                correction = str(review.get("retry_direction", "")).strip()
+                retry_prompt = base_prompt + f'''\n\nTHE FIRST IMAGE WAS REJECTED BY VISUAL QUALITY CONTROL.
+REVIEW SCORE: {review['score']}/100.
+REJECTION ISSUES: {json.dumps(review.get('issues', []), ensure_ascii=False)}
+MANDATORY CORRECTION: {correction or "Make the affected technology and exact attack mechanism unmistakable; remove generic or unrelated elements."}
+Create a substantially improved second composition, not a minor variation.'''
+                image_b64 = client.images.generate(model=image_model, prompt=retry_prompt, size="1024x1536").data[0].b64_json
+                attempts = 2
+                review = review_artwork(client, req, image_b64)
+        except Exception as review_error:
+            review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
+        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"vision-reviewed-v6","generation_attempts":attempts,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
