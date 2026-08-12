@@ -1,6 +1,17 @@
 /* Latest Cybersecurity News Search — sources from uploaded Global Cybersecurity Resources */
 (() => {
   const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  async function responseData(response) {
+    const raw = await response.text();
+    if (!raw) return {};
+    try { return JSON.parse(raw); }
+    catch {
+      if (/upstream error|bad gateway|service unavailable|gateway timeout/i.test(raw)) {
+        throw new Error('الخدمة الخارجية غير متاحة مؤقتًا. انتظر قليلًا ثم أعد المحاولة.');
+      }
+      throw new Error(`استجابة غير صالحة من الخادم (HTTP ${response.status}).`);
+    }
+  }
   const waitForNews = () => new Promise(resolve => {
     const found = document.getElementById('news');
     if (found) return resolve(found);
@@ -54,7 +65,7 @@
     status.textContent = 'جاري البحث في أحدث الأخبار السيبرانية من المصادر المعتمدة...';
     try {
       const r = await fetch('/api/search-news', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-      const d = await r.json();
+      const d = await responseData(r);
       if (!r.ok) throw new Error(d.detail || 'تعذر البحث');
       const items = d.items || [];
       if (!items.length) {
@@ -238,7 +249,7 @@
         style:document.getElementById('newsVideoStyle').value,
         duration:Number(document.getElementById('newsVideoDuration').value)
       })});
-      const job = await response.json();
+      const job = await responseData(response);
       if (!response.ok) throw new Error(job.detail || 'تعذر بدء توليد الفيديو');
       poll(job.id);
     } catch (error) {
@@ -253,7 +264,7 @@
     const btn = document.getElementById('newsGenerateVideo');
     try {
       const response = await fetch('/api/news-video/' + encodeURIComponent(jobId));
-      const job = await response.json();
+      const job = await responseData(response);
       if (!response.ok) throw new Error(job.detail || 'تعذر قراءة حالة الفيديو');
       if (job.status === 'processing') {
         status.textContent = 'Bytez يعالج الفيديو الآن... يمكنك إبقاء الصفحة مفتوحة.';
