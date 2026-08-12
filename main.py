@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.13.3")
+app = FastAPI(title="GPT Cyber Content API", version="0.13.4")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,7 +183,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.13.3", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.13.4", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
@@ -202,10 +202,13 @@ def _video_url(output: Any) -> str:
     raise ValueError("Bytez returned no playable video URL")
 
 def _available_bytez_video_models(client: httpx.Client) -> list[str]:
-    response = client.get(
-        "https://api.bytez.com/models/v2/list/models",
-        headers={"Authorization": os.environ["BYTEZ_API_KEY"]},
-    )
+    url = "https://api.bytez.com/models/v2/list/models"
+    headers = {"Authorization": os.environ["BYTEZ_API_KEY"]}
+    response = client.get(url, headers=headers, params={"task": "text-to-video"})
+    if response.status_code >= 500:
+        response = client.get(url, headers=headers, params={"task": "text-to-video"})
+    if response.status_code >= 500:
+        response = client.get(url, headers=headers)
     response.raise_for_status()
     payload = response.json()
     if isinstance(payload, dict) and payload.get("error"):
@@ -231,19 +234,18 @@ UNAVAILABLE_BYTEZ_VIDEO_MODELS = {"ali-vilab/text-to-video-ms-1.7b"}
 def _bytez_video_candidates(client: httpx.Client) -> list[str]:
     configured = os.getenv("BYTEZ_VIDEO_MODEL", "").strip()
     models = _available_bytez_video_models(client)
-    candidates = ([configured] if configured else []) + models
+    configured_is_usable = configured and configured not in UNAVAILABLE_BYTEZ_VIDEO_MODELS
+    candidates = ([configured] if configured_is_usable else []) + models
     unique = []
     for model in candidates:
         if model and model not in UNAVAILABLE_BYTEZ_VIDEO_MODELS and model not in unique:
             unique.append(model)
     if unique:
         return unique
-    if configured in UNAVAILABLE_BYTEZ_VIDEO_MODELS:
-        raise ValueError(
-            "نموذج BYTEZ_VIDEO_MODEL المحدد لم يعد متاحًا. احذف المتغير من Railway "
-            "أو استبدله بمعرّف text-to-video ظاهر حاليًا في حساب Bytez."
-        )
-    raise ValueError("لا يوجد نموذج text-to-video متاح حاليًا في حساب Bytez")
+    raise ValueError(
+        "لم يعثر Bytez على أي نموذج text-to-video متاح لهذا المفتاح. "
+        "تحقق من توفر نماذج الفيديو والرصيد في حساب Bytez."
+    )
 
 def _run_video_job(job_id: str, req: NewsVideoRequest):
     model = os.getenv("BYTEZ_VIDEO_MODEL", "automatic").strip() or "automatic"
