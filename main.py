@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.15.1")
+app = FastAPI(title="GPT Cyber Content API", version="0.16.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,9 +183,9 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.15.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.16.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
-        "news_artwork":"vision-reviewed-v6", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "news_artwork":"editorial-causal-v7", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
     }
@@ -425,7 +425,7 @@ def visual_prompt(req: ImageRequest):
 FORMAT: vertical Instagram 4:5 portrait.
 BRAND VISUAL SYSTEM: deep black/dark navy #050B12, Cyber Blue #0A84FF, Cyan #00D1C7. Red only when the supplied risk is high/critical. Subtle circuit patterns, restrained digital grid, soft blue/cyan atmospheric glow. Premium enterprise cybersecurity media publication quality, sophisticated and minimal, never gaming-like.
 SEMANTIC ACCURACY IS THE HIGHEST PRIORITY: represent the news subject directly and literally. Every prominent object must be traceable to the supplied story. Show the affected technology and the reported action/risk in one coherent scene. Do not invent an unrelated visual metaphor. If the story is about software updates or security patches, show an update/patch deployment environment, recognizable software/platform geometry, prioritized critical update objects, protected enterprise devices or servers, and security status cues. Never translate "patch", "leak", "bug", "cloud", "virus", "worm", "gateway", or similar technical terms into unrelated physical objects unless the supplied story is actually about those physical objects.
-STRICT COMPOSITION: Create one strong topic-specific editorial hero scene across the canvas, with the most informative visual concentrated in the center/lower half. Preserve clean dark text-safe space across the upper 35-40% for an Arabic headline and small metadata badges. Keep safe space at the top-right for the Cyber Pulse logo.
+STRICT COMPOSITION: Build a cinematic explanatory editorial scene, not a generic stock-style cybersecurity image. The scene must visually tell the incident in one glance: affected platform/context -> vulnerable feature or action -> visible impact on the affected devices. Use depth, clear focal hierarchy, realistic enterprise people/devices where relevant, and precise cyan-versus-red visual causality. Concentrate the explanatory action in the center/lower 55-60%. Preserve a genuinely empty, dark, low-detail text-safe editorial panel across the upper 35-40%; no faces, bright objects, interface panels, attack paths, or important details may enter that panel. Keep additional safe space at the top-right for the Cyber Pulse logo.
 ABSOLUTE NO-TEXT RULE: ZERO readable Arabic or English, words, letters, numbers, CVEs, product names, UI labels, captions, headlines, hashtags, watermarks, signatures, brand names, pseudo-text or typographic logo marks.
 Simplified non-readable interface panels, update progress shapes, product geometry, patch tiles, device screens, and security-status cards are allowed only when they directly clarify the supplied story. They must contain no text or pseudo-text.
 DO NOT CREATE flowcharts, generic dashboards unrelated to the story, browser directory lists, dense tables, hacker hoodies, masks, skulls, Matrix code, random binary streams, plumbing, water leaks, bandages, construction tools, repair tools, or clutter unless explicitly required by the factual story.
@@ -433,7 +433,7 @@ DIRECT VISUAL BRIEF: {req.visual_direction}
 NEWS TITLE: {req.title}
 FACTUAL CONTEXT: {req.body}
 {zoom_contract}
-Final self-check before rendering: would a viewer identify the technology and event without reading the headline? If not, revise the scene to be more direct and topic-specific.'''
+Final self-check before rendering: (1) would a viewer identify the technology and event without reading the headline, (2) can the viewer follow the attack or risk mechanism from its origin to its impact, and (3) does the image have a clear editorial hierarchy rather than merely containing the right objects? If any answer is no, revise before rendering.'''
     common = f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, hashtags, watermarks or pseudo-text. Leave typography zones empty. {req.visual_direction}"
     if req.domain.strip().upper() == "GRC": style = "Premium light government/enterprise GRC infographic artwork; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; polished enterprise vector/semi-3D icons; generous whitespace; no hacker clichés."
     elif req.visual_style == "Executive Minimal": style = "Executive minimal artwork, white background, navy/blue, strong central metaphor, whitespace."
@@ -456,12 +456,14 @@ Score these criteria:
 4. The scene has premium Cyber Pulse editorial quality: dark navy, cyan/teal, restrained risk red, clean and professional.
 5. The upper 35-40% remains usable for Arabic headline and metadata, and the top-right has safe logo space.
 6. There is no readable generated text, pseudo-text, watermark, distorted typography, hacker hoodie, or unrelated clutter.
+7. The image explains a causal story, not merely a collection of relevant objects: the origin/action, path or mechanism, and impact are visually connected.
+8. The composition has editorial hierarchy and cinematic depth comparable to a premium technology-news cover: one dominant focal point, supporting context, and no stock-photo/generic-dashboard feeling.
 
 For Zoom Annotation / screen-sharing takeover stories specifically, a strong image should clearly show a video meeting with several participants, a shared-screen canvas, an annotation pen/drawing stroke/cursor acting on that shared screen, and unauthorized control spreading from the annotated screen toward two or more participant devices. A generic laptop, generic meeting grid, arrow, user icon, software-update window, or download screen is insufficient and must not be requested.
 
 Return ONLY valid JSON:
 {{"semantic_match":true,"score":0,"technology_visible":true,"mechanism_visible":true,"composition_ok":true,"issues":["concise issue"],"retry_direction":"specific English correction prompt for the image generator","summary_ar":"سطر عربي مختصر يشرح نتيجة المراجعة"}}
-Set semantic_match=true only when score is at least 78 and both technology_visible and mechanism_visible are true.'''
+Set semantic_match=true only when score is at least 82 and technology_visible, mechanism_visible, and composition_ok are all true. A visually generic image cannot pass even if it contains the correct platform and objects.'''
     response = client.responses.create(
         model=os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-5")),
         input=[{"role":"user","content":[
@@ -474,8 +476,9 @@ Set semantic_match=true only when score is at least 78 and both technology_visib
     score = max(0, min(100, int(review.get("score", 0))))
     review["score"] = score
     review["semantic_match"] = bool(
-        review.get("semantic_match") and score >= 78
+        review.get("semantic_match") and score >= 82
         and review.get("technology_visible") and review.get("mechanism_visible")
+        and review.get("composition_ok")
     )
     return review
 
@@ -509,5 +512,5 @@ Create a substantially different and improved composition, not a minor variation
                 image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
                 attempts += 1
             review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
-        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"vision-reviewed-v6","generation_attempts":attempts,"semantic_review":review}
+        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"editorial-causal-v7","generation_attempts":attempts,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
