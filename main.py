@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.13.4")
+app = FastAPI(title="GPT Cyber Content API", version="0.14.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -183,9 +183,9 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.13.4", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.14.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
-        "news_artwork":"text-free-editorial-v4", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "news_artwork":"semantic-direct-v5", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
     }
@@ -255,7 +255,8 @@ Factual context: {req.summary}
 Threat category: {req.threat_type}
 Visual direction: {req.visual_brief or "abstract digital security environment"}
 Style: {req.style}. Target duration: approximately {req.duration} seconds.
-Use dark navy and black with cyan and cyber blue highlights. Use elegant cinematic movement, realistic lighting, and one coherent scene. Do not show readable text, letters, numbers, captions, logos, watermarks, dashboards, or distorted interfaces. Do not depict graphic violence or panic.'''
+SEMANTIC RULE: show the affected technology and reported action/risk directly. Every prominent object must be traceable to the topic. Never replace a technical term with an unrelated physical metaphor. Software patches and updates must look like software update/patch deployment, not plumbing, water leaks, bandages, construction, or hand tools. Simplified non-readable interfaces are allowed only when they clarify the story.
+Use dark navy and black with cyan and cyber blue highlights. Use elegant cinematic movement, realistic lighting, and one coherent scene. Do not show readable text, letters, numbers, captions, logos, watermarks, unrelated dashboards, or distorted interfaces. Do not depict graphic violence or panic.'''
     try:
         with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
             payload = None
@@ -400,7 +401,7 @@ def parse_news(req: NewsParseRequest):
 Parse ONLY supplied facts. Never invent or silently correct CVEs, dates, severity, vendors, sources or recommendations.
 HEADLINE:\n{req.title}\n\nPASTED NEWS:\n{req.news}
 Return ONLY valid JSON with: headline, severity (حرج/عالي/متوسط/منخفض/or empty), date, cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption, hashtags.
-For visual_brief, describe ONE simple editorial metaphor specific to the affected technology and risk mechanism. The brief MUST NOT request visible words, product names, interface labels, UI screens, dashboards, diagrams, flowcharts, logos with text, letters or numbers. It should describe only visual objects and relationships.
+For visual_brief, describe ONE direct, literal editorial scene that immediately identifies the affected technology, vendor/product category, and the reported action or risk. Prefer recognizable product geometry, device/server context, patch/update objects, cloud/email/browser/mobile cues, or incident-specific objects that are explicitly supported by the supplied news. Do NOT replace the subject with a loose metaphor. For example, software patches must look like software update/patch deployment, never plumbing, water leaks, bandages, construction, tools, or physical repair. The brief MUST NOT request readable words, interface labels, captions, diagrams, flowcharts, logos containing text, letters or numbers. It may request simplified non-readable interface shapes only when the story is specifically about software, updates, identity, cloud, email, browsers, or mobile apps.
 Caption must be one polished, self-contained Arabic post ready to paste into BOTH LinkedIn and Instagram. Use 140-260 words and rely only on supplied facts.
 Format the caption as readable social copy using plain text and intentional line breaks:
 1. Open with a strong, factual hook or headline (no clickbait).
@@ -416,15 +417,18 @@ Hashtags must be a JSON array of 6-10 concise Arabic or English hashtags relevan
 
 def visual_prompt(req: ImageRequest):
     if req.visual_style == "Cyber Pulse":
-        return f'''Create ONLY the visual background artwork for a premium cybersecurity news post.
+        return f'''Create ONLY the visual background artwork for a premium cybersecurity news post. Before composing, identify the exact subject, affected technology/vendor category, event, and risk mechanism from the supplied title, context, and visual direction.
 FORMAT: vertical Instagram 4:5 portrait.
 BRAND VISUAL SYSTEM: deep black/dark navy #050B12, Cyber Blue #0A84FF, Cyan #00D1C7. Red only when the supplied risk is high/critical. Subtle circuit patterns, restrained digital grid, soft blue/cyan atmospheric glow. Premium enterprise cybersecurity media publication quality, sophisticated and minimal, never gaming-like.
-STRICT COMPOSITION: LEFT 35-40% ONLY contains ONE large topic-specific editorial hero visual. RIGHT 60-65% remains intentionally EMPTY, clean, dark text-safe negative space.
+SEMANTIC ACCURACY IS THE HIGHEST PRIORITY: represent the news subject directly and literally. Every prominent object must be traceable to the supplied story. Show the affected technology and the reported action/risk in one coherent scene. Do not invent an unrelated visual metaphor. If the story is about software updates or security patches, show an update/patch deployment environment, recognizable software/platform geometry, prioritized critical update objects, protected enterprise devices or servers, and security status cues. Never translate "patch", "leak", "bug", "cloud", "virus", "worm", "gateway", or similar technical terms into unrelated physical objects unless the supplied story is actually about those physical objects.
+STRICT COMPOSITION: Create one strong topic-specific editorial hero scene across the canvas, with the most informative visual concentrated in the center/lower half. Preserve clean dark text-safe space across the upper 35-40% for an Arabic headline and small metadata badges. Keep safe space at the top-right for the Cyber Pulse logo.
 ABSOLUTE NO-TEXT RULE: ZERO readable Arabic or English, words, letters, numbers, CVEs, product names, UI labels, captions, headlines, hashtags, watermarks, signatures, brand names, pseudo-text or typographic logo marks.
-DO NOT CREATE technical diagrams, flowcharts, dashboards, software interfaces, screenshots, browser windows, directory lists, tables, cards containing text, hacker hoodies, masks, skulls, Matrix code, random binary streams or clutter.
-STORY CONCEPT: {req.visual_direction}
-Context only: {req.title}. {req.body}
-Represent the story through ONE simple editorial visual metaphor, not a literal software UI. The left side contains the hero; the right side remains mostly empty dark space ready for Arabic typography.'''
+Simplified non-readable interface panels, update progress shapes, product geometry, patch tiles, device screens, and security-status cards are allowed only when they directly clarify the supplied story. They must contain no text or pseudo-text.
+DO NOT CREATE flowcharts, generic dashboards unrelated to the story, browser directory lists, dense tables, hacker hoodies, masks, skulls, Matrix code, random binary streams, plumbing, water leaks, bandages, construction tools, repair tools, or clutter unless explicitly required by the factual story.
+DIRECT VISUAL BRIEF: {req.visual_direction}
+NEWS TITLE: {req.title}
+FACTUAL CONTEXT: {req.body}
+Final self-check before rendering: would a viewer identify the technology and event without reading the headline? If not, revise the scene to be more direct and topic-specific.'''
     common = f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, hashtags, watermarks or pseudo-text. Leave typography zones empty. {req.visual_direction}"
     if req.domain.strip().upper() == "GRC": style = "Premium light government/enterprise GRC infographic artwork; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; polished enterprise vector/semi-3D icons; generous whitespace; no hacker clichés."
     elif req.visual_style == "Executive Minimal": style = "Executive minimal artwork, white background, navy/blue, strong central metaphor, whitespace."
@@ -436,5 +440,5 @@ def generate_image(req: ImageRequest):
     if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
     try:
         r = OpenAI(api_key=os.getenv("OPENAI_API_KEY")).images.generate(model=os.getenv("OPENAI_IMAGE_MODEL","gpt-image-1"), prompt=visual_prompt(req), size="1024x1536")
-        return {"b64_json":r.data[0].b64_json,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"text-free-editorial-v4"}
+        return {"b64_json":r.data[0].b64_json,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"semantic-direct-v5"}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
