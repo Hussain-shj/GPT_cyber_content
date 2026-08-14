@@ -270,7 +270,12 @@
         d = await responseData(r);
       if (!r.ok) throw Error(d.detail || "فشل التحليل");
       parsed = d;
-      const bits = [d.date, d.severity, d.cve, d.threat_type].filter(Boolean);
+      const bits = [
+        d.date ? `${d.date}${d.date_verified ? " ✓ تاريخ المصدر" : ""}` : "التاريخ غير موثّق",
+        d.severity,
+        d.cve,
+        d.threat_type,
+      ].filter(Boolean);
       q("newsMeta").innerHTML =
         `<div class="news-meta-box">${bits.map(esc).join(" | ")}</div>`;
       await generateArt();
