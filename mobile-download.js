@@ -10,20 +10,6 @@
       /([A-Za-z][A-Za-z0-9./+&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9./+&_-]*)*)/g,
       "\u2066$1\u2069",
     );
-  async function responseData(response) {
-    const raw = await response.text();
-    if (!raw) return {};
-    try {
-      return JSON.parse(raw);
-    } catch {
-      const upstream = /upstream error|bad gateway|service unavailable|gateway timeout/i.test(raw);
-      throw new Error(
-        upstream
-          ? "خدمة التوليد غير متاحة مؤقتًا. انتظر قليلًا ثم أعد المحاولة."
-          : `استجابة غير صالحة من الخادم (HTTP ${response.status}).`,
-      );
-    }
-  }
   const load = (src) =>
     new Promise((ok, no) => {
       let i = new Image();
@@ -207,6 +193,21 @@
       /([A-Za-z][A-Za-z0-9./+&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9./+&_-]*)*)/g,
       "\u2066$1\u2069",
     );
+  async function responseData(response) {
+    const raw = await response.text();
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      const upstream =
+        /upstream error|bad gateway|service unavailable|gateway timeout/i.test(raw);
+      throw new Error(
+        upstream
+          ? "خدمة التوليد غير متاحة مؤقتًا. انتظر قليلًا ثم أعد المحاولة."
+          : `استجابة غير صالحة من الخادم (HTTP ${response.status}).`,
+      );
+    }
+  }
   const load = (src) =>
     new Promise((ok, no) => {
       let i = new Image();
