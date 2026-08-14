@@ -2,16 +2,18 @@ import base64
 import hashlib
 import hmac
 import html
+import io
 import json
 import os
 import re
 import secrets
 import uuid
 import threading
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import psycopg
 import httpx
@@ -22,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.21.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.22.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -185,7 +187,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.21.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.22.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -402,6 +404,45 @@ def generate_content(req: ContentRequest):
                 slide[field] = " ".join(words[:limit]) + ("…" if len(words) > limit else "")
         d["mode"]="openai"; return d
     except Exception as e: raise HTTPException(500, f"Generation failed: {e}")
+
+@app.post("/api/extract-news-file")
+async def extract_news_file(request: Request):
+    """Extract an alert entirely in memory; the uploaded bytes are never persisted or archived."""
+    max_bytes = 8 * 1024 * 1024
+    raw = await request.body()
+    if not raw: raise HTTPException(400, "الملف فارغ")
+    if len(raw) > max_bytes: raise HTTPException(413, "حجم الملف يتجاوز 8 ميجابايت")
+    filename = unquote(request.headers.get("x-news-filename", "alert.txt"))
+    suffix = Path(filename).suffix.lower()
+    allowed = {".pdf", ".docx", ".txt", ".md", ".csv", ".json"}
+    if suffix not in allowed: raise HTTPException(415, "نوع الملف غير مدعوم. استخدم PDF أو DOCX أو TXT أو MD أو CSV أو JSON")
+    try:
+        if suffix == ".pdf":
+            if not raw.startswith(b"%PDF"): raise ValueError("توقيع PDF غير صالح")
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        elif suffix == ".docx":
+            if not zipfile.is_zipfile(io.BytesIO(raw)): raise ValueError("توقيع DOCX غير صالح")
+            from docx import Document
+            document = Document(io.BytesIO(raw))
+            text = "\n".join(p.text for p in document.paragraphs)
+            for table in document.tables:
+                text += "\n" + "\n".join(" | ".join(cell.text for cell in row.cells) for row in table.rows)
+        else:
+            text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(422, "تعذر قراءة ترميز الملف النصي؛ احفظه بترميز UTF-8")
+    except Exception as exc:
+        raise HTTPException(422, f"تعذر استخراج النص من الملف: {exc}")
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) < 10: raise HTTPException(422, "لم يُعثر على نص قابل للقراءة؛ قد يكون الملف صورة ممسوحة ضوئيًا")
+    text = text[:12000]
+    first_line = next((line.strip() for line in text.splitlines() if len(line.strip()) >= 3), "")
+    suggested_title = first_line[:300] if len(first_line) <= 300 else Path(filename).stem[:300]
+    return {"filename":Path(filename).name, "title":suggested_title, "text":text, "stored":False}
 
 @app.post("/api/parse-news")
 def parse_news(req: NewsParseRequest):
