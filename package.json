@@ -3,8 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check remotion/render.mjs",
-    "postinstall": "npx remotion browser ensure"
+    "check": "node --check remotion/render.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.509",
