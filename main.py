@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.26.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.27.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -203,7 +203,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.26.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.27.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -211,7 +211,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"cinematic-ai-music-v4", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"cinematic-eight-clips-v5", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -267,7 +267,7 @@ def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
     return f'''Create a vertical 9:16 cinematic B-roll shot for an Arabic cybersecurity alert.
 Visual style: {styles.get(selected, styles["Cinematic AI"])}.
 Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
-Show culturally accurate adult Emirati professionals where people are relevant: men in clean white kandura and ghutra, women in professional abaya and shayla. Include realistic computers, laptops, cybersecurity screens, server rooms, or executive environments only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
+Show culturally accurate adult Emirati professionals where people are relevant. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Keep wardrobe culturally accurate and professional. Include realistic computers, laptops, cybersecurity screens, server rooms, or executive environments only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
 
 def _generate_veo_clip(prompt: str, output_path: Path):
     api_key = os.environ["GEMINI_API_KEY"]
@@ -439,11 +439,12 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         _write_corporate_music(music_path, duration)
         _fit_scene_durations(script, duration)
         clip_paths = []
-        selected = [script["scenes"][i] for i in sorted(set([0, len(script["scenes"])//2, len(script["scenes"])-1]))]
+        selected = [script["scenes"][i % len(script["scenes"])] for i in range(8)]
         for i, scene in enumerate(selected):
-            _visual_job_update(job_id, status="generating_visuals", progress=48+i*7, message=f"جاري إنشاء اللقطة السينمائية {i+1} من {len(selected)}...", script=script)
+            _visual_job_update(job_id, status="generating_visuals", progress=46+i*3, message=f"جاري إنشاء اللقطة السينمائية {i+1} من 8...", script=script)
             clip_path = work_dir / f"ai-scene-{i+1}.mp4"
-            _generate_veo_clip(_veo_prompt(scene, req), clip_path); clip_paths.append(str(clip_path))
+            shot_direction = ["slow cinematic dolly-in", "controlled side tracking shot", "over-the-shoulder workstation shot", "wide establishing shot", "subtle orbit camera", "close-up hands and screen interaction", "low-angle professional hero shot", "smooth pull-back closing shot"][i]
+            _generate_veo_clip(_veo_prompt(scene, req) + f"\nShot {i+1} of 8. Camera direction: {shot_direction}. Make this composition visually distinct from the other shots.", clip_path); clip_paths.append(str(clip_path))
         _visual_job_update(job_id, status="rendering", progress=75, message="جاري تركيب اللقطات والصوت والترجمة...", script=script)
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
         props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "clipPaths":clip_paths}, ensure_ascii=False), encoding="utf-8")
