@@ -4,6 +4,7 @@ import hmac
 import html
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -29,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.25.1")
+app = FastAPI(title="GPT Cyber Content API", version="0.26.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -202,7 +203,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.25.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.26.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -210,7 +211,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"cinematic-ai-v3", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"cinematic-ai-music-v4", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -382,6 +383,27 @@ def _write_wav(path: Path, audio: bytes, mime_type: str = "audio/l16", sample_ra
     with wave.open(str(path), "rb") as wf:
         return wf.getnframes() / float(wf.getframerate())
 
+def _write_corporate_music(path: Path, duration: float):
+    """Create a restrained instrumental corporate bed: warm pad, piano-like pulse and soft lift."""
+    rate = 24000
+    seconds = min(60.0, max(18.0, duration + 1.5))
+    total = int(rate * seconds)
+    progression = [(261.63,329.63,392.00),(220.00,261.63,329.63),(174.61,220.00,261.63),(196.00,246.94,293.66)]
+    frames = bytearray()
+    for n in range(total):
+        t = n / rate; chord = progression[int(t // 4) % len(progression)]
+        local = t % .5; pluck = math.exp(-local * 7.5)
+        pad = sum(math.sin(2 * math.pi * f * t) for f in chord) / 3
+        pulse_note = chord[int((t * 2) % 3)] * 2
+        pulse = math.sin(2 * math.pi * pulse_note * t) * pluck
+        shimmer = math.sin(2 * math.pi * chord[2] * 2 * t) * (.15 + .1 * math.sin(2 * math.pi * .12 * t))
+        intro = min(1.0, t / 1.2); outro = min(1.0, max(0.0, seconds - t) / 1.4)
+        sample = (pad * .34 + pulse * .22 + shimmer * .10) * intro * outro
+        value = max(-32767, min(32767, int(sample * 11500)))
+        frames.extend(value.to_bytes(2, "little", signed=True))
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(rate); wf.writeframes(frames)
+
 def _fit_scene_durations(script: dict[str, Any], audio_duration: float):
     if audio_duration > 58: raise ValueError("التعليق الصوتي تجاوز الحد المناسب لفيديو 59 ثانية؛ اختصر محتوى التنبيه ثم أعد المحاولة")
     scenes = script["scenes"]
@@ -413,6 +435,8 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         audio, mime_type, sample_rate, channels = _gemini_tts(script)
         audio_path = work_dir / "voiceover.wav"
         duration = _write_wav(audio_path, audio, mime_type, sample_rate, channels)
+        music_path = work_dir / "inspirational-corporate.wav"
+        _write_corporate_music(music_path, duration)
         _fit_scene_durations(script, duration)
         clip_paths = []
         selected = [script["scenes"][i] for i in sorted(set([0, len(script["scenes"])//2, len(script["scenes"])-1]))]
@@ -422,7 +446,7 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
             _generate_veo_clip(_veo_prompt(scene, req), clip_path); clip_paths.append(str(clip_path))
         _visual_job_update(job_id, status="rendering", progress=75, message="جاري تركيب اللقطات والصوت والترجمة...", script=script)
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "clipPaths":clip_paths}, ensure_ascii=False), encoding="utf-8")
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "clipPaths":clip_paths}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
         _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
