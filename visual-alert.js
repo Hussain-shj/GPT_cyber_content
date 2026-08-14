@@ -28,7 +28,7 @@
     section.innerHTML = `
       <div class="section-title va-title">
         <div><h2>محرر التنبيهات المرئي</h2><p>حوّل التنبيه السيبراني إلى فيديو عربي عمودي أقل من دقيقة بضغطة واحدة.</p></div>
-        <span class="counter">MVP v1</span>
+        <span class="counter">Cinematic AI</span>
       </div>
       <div class="va-form">
         <label>عنوان التنبيه</label>
@@ -37,6 +37,8 @@
         <textarea id="vaContent" rows="10" maxlength="12000" placeholder="أدخل تفاصيل التنبيه كما وردت من المصدر"></textarea>
         <label>الإجراء المطلوب</label>
         <textarea id="vaAction" rows="5" maxlength="4000" placeholder="أدخل الإجراءات المطلوب اتخاذها"></textarea>
+        <label>النمط البصري</label>
+        <select id="vaVisualStyle"><option value="Cinematic AI">Cinematic AI — سينمائي واقعي</option><option value="Auto">تلقائي حسب المحتوى</option><option value="SOC Operations">مركز عمليات SOC</option><option value="Executive GRC">مؤسسي وGRC</option><option value="Cyber Awareness">توعية سيبرانية</option></select>
         <button id="vaGenerate" class="action va-generate">🎬 إنشاء الفيديو</button>
         <div id="vaStatus" class="status"></div>
         <div id="vaProgressWrap" class="va-progress-wrap hidden"><div class="va-progress"><span id="vaProgressBar"></span></div><div id="vaSteps" class="va-steps"></div></div>
@@ -86,7 +88,7 @@
     byId("vaProgressWrap").classList.remove("hidden");
     updateProgress(3, "بدء المهمة...");
     try {
-      const response = await fetch("/api/visual-alert/render", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:byId("vaTitle").value.trim(), content:byId("vaContent").value.trim(), required_action:byId("vaAction").value.trim()})});
+      const response = await fetch("/api/visual-alert/render", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:byId("vaTitle").value.trim(), content:byId("vaContent").value.trim(), required_action:byId("vaAction").value.trim(), visual_style:byId("vaVisualStyle").value})});
       const job = await responseData(response);
       if (!response.ok) throw new Error(job.detail || "تعذر بدء إنشاء الفيديو");
       poll(job.id);
