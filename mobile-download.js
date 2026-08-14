@@ -25,6 +25,26 @@
       return null;
     }
   }
+  function grcPostText(d) {
+    const blocks = [];
+    if (d.title) blocks.push(`🔐 ${d.title}`);
+    if (d.hook) blocks.push(`💡 ${d.hook}`);
+    if (d.caption) blocks.push(d.caption);
+    const rec = (d.recommendations || []).filter(Boolean);
+    if (rec.length)
+      blocks.push(`📌 التوصيات العملية:\n${rec.map((x) => `✅ ${x}`).join("\n")}`);
+    if (d.cta) blocks.push(`🎯 ${d.cta}`);
+    const src = (d.sources || []).filter((x) => x && (x.name || x.url));
+    if (src.length)
+      blocks.push(
+        `🔗 المصادر:\n${src.map((x) => `• ${x.name || "المصدر"}${x.url ? `: ${x.url}` : ""}`).join("\n")}`,
+      );
+    const tags = (d.hashtags || [])
+      .filter(Boolean)
+      .map((x) => (x.startsWith("#") ? x : `#${x}`));
+    if (tags.length) blocks.push(tags.join(" "));
+    return blocks.join("\n\n");
+  }
   function wrap(c, t, w) {
     let l = "",
       o = [];
@@ -108,9 +128,7 @@
   async function shareGrc(i) {
     const f = await grcFile(i),
       d = current?.data || {},
-      text = [d.caption, d.cta, ...(d.hashtags || [])]
-        .filter(Boolean)
-        .join("\n\n");
+      text = grcPostText(d);
     if (navigator.share && navigator.canShare?.({ files: [f] }))
       return navigator.share({ files: [f], text, title: "نبض سيبراني | GRC" });
     await navigator.clipboard?.writeText(text);
