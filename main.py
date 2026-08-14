@@ -189,7 +189,7 @@ def health():
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
-        "news_artwork":"three-choice-v8", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
     }
