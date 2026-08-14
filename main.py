@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.23.2")
+app = FastAPI(title="GPT Cyber Content API", version="0.23.3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -201,7 +201,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.23.2", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.23.3", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -249,7 +249,59 @@ REQUIRED ACTION:
     if not clean: raise ValueError("تعذر تكوين مشاهد الفيديو")
     return {"videoTitle":str(data.get("videoTitle", req.title))[:300], "scenes":clean}
 
-def _gemini_tts(script: dict[str, Any]) -> bytes:
+def _extract_gemini_audio(payload: Any) -> tuple[bytes, str, int, int] | None:
+    """Find audio in both the current Interactions REST schema and legacy responses."""
+    def walk(value: Any, inherited: dict[str, Any] | None = None):
+        if isinstance(value, dict):
+            meta = dict(inherited or {})
+            for key in ("mime_type", "mimeType", "sample_rate", "sampleRate", "channels"):
+                if value.get(key) is not None:
+                    meta[key] = value[key]
+
+            mime = str(meta.get("mime_type") or meta.get("mimeType") or "").lower()
+            is_audio = value.get("type") in {"audio", "output_audio"} or mime.startswith("audio/")
+            data = value.get("data")
+            if is_audio and isinstance(data, str) and data:
+                try:
+                    decoded = base64.b64decode(data, validate=True)
+                except (ValueError, TypeError):
+                    decoded = b""
+                if decoded:
+                    rate = int(meta.get("sample_rate") or meta.get("sampleRate") or 24000)
+                    channels = int(meta.get("channels") or 1)
+                    return decoded, mime or "audio/l16", rate, channels
+
+            for key in ("output_audio", "inlineData", "inline_data", "audio"):
+                if key in value:
+                    found = walk(value[key], meta)
+                    if found:
+                        return found
+            for key, child in value.items():
+                if key not in {"output_audio", "inlineData", "inline_data", "audio", "data"}:
+                    found = walk(child, meta)
+                    if found:
+                        return found
+        elif isinstance(value, list):
+            for child in value:
+                found = walk(child, inherited)
+                if found:
+                    return found
+        return None
+
+    return walk(payload)
+
+def _gemini_response_shape(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return type(payload).__name__
+    keys = sorted(str(key) for key in payload.keys())[:12]
+    step_types = []
+    for step in payload.get("steps", []) if isinstance(payload.get("steps"), list) else []:
+        if isinstance(step, dict):
+            step_types.append(str(step.get("type") or step.get("role") or "unknown"))
+    suffix = f"; step_types={step_types[:12]}" if step_types else ""
+    return f"keys={keys}{suffix}"
+
+def _gemini_tts(script: dict[str, Any]) -> tuple[bytes, str, int, int]:
     transcript = "\n".join(s["voiceText"] for s in script["scenes"] if s.get("voiceText"))
     if not transcript: raise ValueError("سيناريو التعليق الصوتي فارغ")
     instruction = f'''Read the following Arabic cybersecurity alert in a natural professional UAE/Emirati speaking style.
@@ -261,18 +313,22 @@ TRANSCRIPT:
     with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
         response = client.post(
             "https://generativelanguage.googleapis.com/v1beta/interactions",
-            headers={"x-goog-api-key":os.environ["GEMINI_API_KEY"], "Content-Type":"application/json"},
+            headers={"x-goog-api-key":os.environ["GEMINI_API_KEY"], "Content-Type":"application/json", "Api-Revision":"2026-05-20"},
             json={"model":model, "input":instruction, "response_format":{"type":"audio"}, "generation_config":{"speech_config":[{"voice":os.getenv("GEMINI_TTS_VOICE", "Charon")}]}},
         )
         response.raise_for_status()
         payload = response.json()
-    audio = payload.get("output_audio", {}).get("data")
-    if not audio: raise ValueError("لم يُرجع Gemini بيانات صوتية")
-    return base64.b64decode(audio)
+    audio = _extract_gemini_audio(payload)
+    if not audio:
+        raise ValueError("لم يُرجع Gemini بيانات صوتية قابلة للقراءة (" + _gemini_response_shape(payload) + ")")
+    return audio
 
-def _write_wav(path: Path, pcm: bytes) -> float:
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(24000); wf.writeframes(pcm)
+def _write_wav(path: Path, audio: bytes, mime_type: str = "audio/l16", sample_rate: int = 24000, channels: int = 1) -> float:
+    if audio.startswith(b"RIFF") or "wav" in mime_type.lower():
+        path.write_bytes(audio)
+    else:
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(max(1, channels)); wf.setsampwidth(2); wf.setframerate(max(8000, sample_rate)); wf.writeframes(audio)
     with wave.open(str(path), "rb") as wf:
         return wf.getnframes() / float(wf.getframerate())
 
@@ -304,9 +360,9 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
     try:
         script = _visual_script(req)
         _visual_job_update(job_id, status="generating_voice", progress=38, message="جاري إنشاء التعليق الصوتي...", script=script)
-        pcm = _gemini_tts(script)
+        audio, mime_type, sample_rate, channels = _gemini_tts(script)
         audio_path = work_dir / "voiceover.wav"
-        duration = _write_wav(audio_path, pcm)
+        duration = _write_wav(audio_path, audio, mime_type, sample_rate, channels)
         _fit_scene_durations(script, duration)
         _visual_job_update(job_id, status="rendering", progress=65, message="جاري مزامنة الصوت وتجهيز الفيديو...", script=script)
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
