@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.28.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.29.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -203,7 +203,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.28.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.29.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -211,7 +211,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"cinematic-six-clips-58s-v6", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"hybrid-veo-nano-six-scenes-v7", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -275,6 +275,10 @@ def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
 Visual style: {styles.get(selected, styles["Cinematic AI"])}.
 Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
 Show culturally accurate adult Emirati professionals where people are relevant. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Keep wardrobe culturally accurate and professional. Include realistic computers, laptops, cybersecurity screens, server rooms, or executive environments only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
+
+def _cinematic_still_prompt(scene: dict[str, Any], req: VisualAlertRequest, index: int) -> str:
+    directions = ["wide establishing composition", "medium workstation composition", "over-the-shoulder composition", "executive close-up composition", "server-room depth composition", "calm professional closing composition"]
+    return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nStill image {index+1} of 6. Composition: {directions[index]}. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
 
 def _generate_veo_clip(prompt: str, output_path: Path):
     api_key = os.environ["GEMINI_API_KEY"]
@@ -455,16 +459,25 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         music_path = work_dir / "inspirational-corporate.wav"
         _write_corporate_music(music_path, duration)
         _fit_scene_durations(script, duration)
-        clip_paths = []
+        clip_paths, image_paths = [], []
         selected = [script["scenes"][i % len(script["scenes"])] for i in range(6)]
-        for i, scene in enumerate(selected):
-            _visual_job_update(job_id, status="generating_visuals", progress=46+i*4, message=f"جاري إنشاء اللقطة السينمائية {i+1} من 6...", script=script)
-            clip_path = work_dir / f"ai-scene-{i+1}.mp4"
-            shot_direction = ["slow cinematic dolly-in", "controlled side tracking shot", "over-the-shoulder workstation shot", "wide establishing shot", "subtle orbit camera", "smooth pull-back closing shot"][i]
-            _generate_veo_clip(_veo_prompt(scene, req) + f"\nShot {i+1} of 6. Camera direction: {shot_direction}. Make this composition visually distinct from the other shots.", clip_path); clip_paths.append(str(clip_path))
+        _visual_job_update(job_id, status="generating_visuals", progress=46, message="جاري إنشاء مقطع Veo السينمائي الوحيد...", script=script)
+        clip_path = work_dir / "ai-scene-1.mp4"
+        try:
+            _generate_veo_clip(_veo_prompt(selected[0], req) + "\nOpening hero shot. Slow cinematic dolly-in. Make it suitable as the main motion clip.", clip_path)
+            clip_paths.append(str(clip_path)); first_image = 1
+        except Exception as veo_error:
+            if "429" not in str(veo_error) and "quota" not in str(veo_error).lower(): raise
+            first_image = 0
+            _visual_job_update(job_id, message="حصة Veo مستخدمة اليوم؛ سيتم إكمال الفيديو بصور سينمائية متحركة.", veo_fallback=str(veo_error)[:500])
+        for i in range(first_image, 6):
+            _visual_job_update(job_id, status="generating_visuals", progress=50+i*4, message=f"جاري إنشاء المشهد السينمائي {i+1} من 6...", script=script)
+            image_b64, _ = generate_nano_banana_image(_cinematic_still_prompt(selected[i], req, i), "9:16")
+            image_path = work_dir / f"ai-scene-{i+1}.jpg"
+            image_path.write_bytes(base64.b64decode(image_b64)); image_paths.append(str(image_path))
         _visual_job_update(job_id, status="rendering", progress=75, message="جاري تركيب اللقطات والصوت والترجمة...", script=script)
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "clipPaths":clip_paths}, ensure_ascii=False), encoding="utf-8")
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "clipPaths":clip_paths, "imagePaths":image_paths}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
         _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
@@ -924,7 +937,7 @@ def _find_gemini_image_data(value: Any) -> str:
                 return found
     return ""
 
-def generate_nano_banana_image(prompt: str) -> tuple[str, str]:
+def generate_nano_banana_image(prompt: str, aspect_ratio: str = "4:5") -> tuple[str, str]:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured")
@@ -935,7 +948,7 @@ def generate_nano_banana_image(prompt: str) -> tuple[str, str]:
         "response_format": {
             "type": "image",
             "mime_type": "image/jpeg",
-            "aspect_ratio": "4:5",
+            "aspect_ratio": aspect_ratio,
             "image_size": os.getenv("GEMINI_IMAGE_SIZE", "1K"),
         },
     }
