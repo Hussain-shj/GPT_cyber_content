@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.18.1")
+app = FastAPI(title="GPT Cyber Content API", version="0.19.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -184,11 +185,11 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.18.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.19.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
-        "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
+        "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"source-date-verified-v4",
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
@@ -404,7 +405,8 @@ def parse_news(req: NewsParseRequest):
     prompt = f'''You are the editorial intelligence engine for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
 Parse ONLY supplied facts. Never invent or silently correct CVEs, dates, severity, vendors, sources or recommendations.
 HEADLINE:\n{req.title}\n\nPASTED NEWS:\n{req.news}
-Return ONLY valid JSON with: headline, severity (حرج/عالي/متوسط/منخفض/or empty), date, cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption, hashtags.
+Find the exact original article/advisory page on the named source website when possible. The date field MUST be the publication date displayed by that source page, never today's date, the date of analysis, or an inferred date. Return an empty date if the original publication date cannot be verified.
+Return ONLY valid JSON with: headline, severity (حرج/عالي/متوسط/منخفض/or empty), date, date_verified (boolean), source_url (direct exact article URL or empty), cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption, hashtags.
 For visual_brief, describe ONE direct, literal editorial scene that immediately identifies the affected technology, vendor/product category, and the reported action or risk. Prefer recognizable product geometry, device/server context, patch/update objects, cloud/email/browser/mobile cues, or incident-specific objects that are explicitly supported by the supplied news. Do NOT replace the subject with a loose metaphor. For example, software patches must look like software update/patch deployment, never plumbing, water leaks, bandages, construction, tools, or physical repair. The brief MUST NOT request readable words, interface labels, captions, diagrams, flowcharts, logos containing text, letters or numbers. It may request simplified non-readable interface shapes only when the story is specifically about software, updates, identity, cloud, email, browsers, or mobile apps.
 Caption must be one polished, self-contained Arabic post ready to paste into BOTH LinkedIn and Instagram. Use 140-260 words and rely only on supplied facts.
 Format the caption as readable social copy using plain text and intentional line breaks:
@@ -416,8 +418,72 @@ Format the caption as readable social copy using plain text and intentional line
 6. End with one natural engagement question or call to action, then place @cyberpulse_ar on its own line.
 Keep paragraphs short, professional, direct, RTL-friendly, and easy to scan on mobile. Do not use Markdown headings, asterisks, numbered lists, excessive emojis, or hashtags inside caption.
 Hashtags must be a JSON array of 6-10 concise Arabic or English hashtags relevant to the supplied story, each beginning with #. Always include #نبض_سيبراني and #الأمن_السيبراني.'''
-    try: return extract_json(client.responses.create(model=model, input=prompt, store=False).output_text)
+    try:
+        parsed = extract_json(client.responses.create(model=model, input=prompt, tools=[{"type":"web_search"}], store=False).output_text)
+        source_url = str(parsed.get("source_url", "")).strip()
+        pasted_urls = re.findall(r'https?://[^\s<>"\']+', req.news)
+        candidate_urls = pasted_urls + ([source_url] if source_url else [])
+        verified_date, verified_url = "", ""
+        for candidate in candidate_urls:
+            candidate = candidate.rstrip(".,،؛;:!?)]}")
+            if not url_is_approved(candidate):
+                continue
+            verified_date = source_publication_date(candidate)
+            if verified_date:
+                verified_url = candidate
+                break
+        if verified_date:
+            parsed["date"] = verified_date
+            parsed["date_verified"] = True
+            parsed["source_url"] = verified_url
+        else:
+            parsed["date_verified"] = bool(parsed.get("date_verified") and source_url and url_is_approved(source_url))
+            if not parsed["date_verified"]:
+                parsed["date"] = ""
+        return parsed
     except Exception as e: raise HTTPException(500, f"News parsing failed: {e}")
+
+ARABIC_MONTHS = {
+    1:"يناير", 2:"فبراير", 3:"مارس", 4:"أبريل", 5:"مايو", 6:"يونيو",
+    7:"يوليو", 8:"أغسطس", 9:"سبتمبر", 10:"أكتوبر", 11:"نوفمبر", 12:"ديسمبر",
+}
+
+def _format_source_date(value: str) -> str:
+    raw = html.unescape(str(value or "")).strip()
+    if not raw:
+        return ""
+    iso = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso)
+        return f"{dt.day} {ARABIC_MONTHS[dt.month]} {dt.year}"
+    except ValueError:
+        pass
+    match = re.search(r'\b(20\d{2})-(\d{1,2})-(\d{1,2})\b', raw)
+    if match:
+        year, month, day = map(int, match.groups())
+        if month in ARABIC_MONTHS:
+            return f"{day} {ARABIC_MONTHS[month]} {year}"
+    return raw[:80]
+
+def source_publication_date(url: str) -> str:
+    try:
+        with httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True) as client:
+            response = client.get(url, headers={"User-Agent":"Mozilla/5.0 CyberPulseBot/1.0"})
+            response.raise_for_status()
+        page = response.text[:2_000_000]
+        patterns = [
+            r'<meta[^>]+(?:property|name)=["\']article:published_time["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']article:published_time["\']',
+            r'<meta[^>]+(?:property|name)=["\'](?:datePublished|date|pubdate|publish-date)["\'][^>]+content=["\']([^"\']+)',
+            r'["\']datePublished["\']\s*:\s*["\']([^"\']+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, page, re.IGNORECASE)
+            if match:
+                return _format_source_date(match.group(1))
+    except Exception:
+        return ""
+    return ""
 
 def visual_prompt(req: ImageRequest):
     if req.visual_style == "Cyber Pulse":
