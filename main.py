@@ -209,7 +209,8 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"mvp-v1", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+        "visual_alert_editor":"mvp-v1", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
 def _visual_job_update(job_id: str, **values):
