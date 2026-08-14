@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.27.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.28.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -203,7 +203,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.27.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.28.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -211,7 +211,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"cinematic-eight-clips-v5", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"cinematic-six-clips-58s-v6", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -223,7 +223,7 @@ def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     prompt = f'''You are a professional cybersecurity short-form video editor.
 Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
-Target 30-50 seconds, maximum 55 seconds. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text. Each visual suggestion must feature a lively UAE government or enterprise environment where relevant: Emirati men in kandura and ghutra, Emirati women in professional abaya and shayla, computers, security-operation screens, servers, laptops, and cybersecurity activity. Keep people respectful, professional, realistic, and culturally accurate.
+Target 38-50 seconds and never exceed 55 seconds. The combined voiceText across ALL scenes must be no more than 100 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text. Each visual suggestion must feature a lively UAE government or enterprise environment where relevant: Emirati men in kandura and ghutra, Emirati women in professional abaya and shayla, computers, security-operation screens, servers, laptops, and cybersecurity activity. Keep people respectful, professional, realistic, and culturally accurate.
 Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, visualSuggestion. The required action must be communicated clearly near the end.
 
 ALERT TITLE:
@@ -252,6 +252,13 @@ SELECTED VISUAL STYLE:
             "visualSuggestion":str(scene.get("visualSuggestion", "")).strip()[:500],
         })
     if not clean: raise ValueError("تعذر تكوين مشاهد الفيديو")
+    remaining = 105
+    for i, scene in enumerate(clean):
+        words = scene["voiceText"].split()
+        later = len(clean) - i - 1
+        allowance = min(20, max(6, remaining - later * 12))
+        scene["voiceText"] = " ".join(words[:allowance])
+        remaining -= min(len(words), allowance)
     return {"videoTitle":str(data.get("videoTitle", req.title))[:300], "scenes":clean}
 
 def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
@@ -383,6 +390,15 @@ def _write_wav(path: Path, audio: bytes, mime_type: str = "audio/l16", sample_ra
     with wave.open(str(path), "rb") as wf:
         return wf.getnframes() / float(wf.getframerate())
 
+def _limit_voice_duration(path: Path, duration: float, maximum: float = 56.5) -> float:
+    if duration <= maximum: return duration
+    tempo = min(2.0, duration / maximum)
+    adjusted = path.with_name("voiceover-adjusted.wav")
+    result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-filter:a", f"atempo={tempo:.5f}", str(adjusted)], capture_output=True, text=True, timeout=120)
+    if result.returncode != 0 or not adjusted.exists(): raise ValueError("تعذر ضبط مدة التعليق الصوتي ضمن 58 ثانية")
+    shutil.move(str(adjusted), str(path))
+    with wave.open(str(path), "rb") as wf: return wf.getnframes() / float(wf.getframerate())
+
 def _write_corporate_music(path: Path, duration: float):
     """Create a restrained instrumental corporate bed: warm pad, piano-like pulse and soft lift."""
     rate = 24000
@@ -405,11 +421,11 @@ def _write_corporate_music(path: Path, duration: float):
         wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(rate); wf.writeframes(frames)
 
 def _fit_scene_durations(script: dict[str, Any], audio_duration: float):
-    if audio_duration > 58: raise ValueError("التعليق الصوتي تجاوز الحد المناسب لفيديو 59 ثانية؛ اختصر محتوى التنبيه ثم أعد المحاولة")
+    if audio_duration > 57: raise ValueError("تعذر ضبط التعليق الصوتي ضمن الحد الأقصى 58 ثانية")
     scenes = script["scenes"]
     weights = [max(1, len(s.get("voiceText", "").split())) for s in scenes]
     total = sum(weights)
-    target = min(59.0, max(18.0, audio_duration + 1.0))
+    target = min(57.5, max(18.0, audio_duration + 1.0))
     remaining = target
     for i, scene in enumerate(scenes):
         duration = remaining if i == len(scenes)-1 else max(2.5, target * weights[i] / total)
@@ -435,16 +451,17 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         audio, mime_type, sample_rate, channels = _gemini_tts(script)
         audio_path = work_dir / "voiceover.wav"
         duration = _write_wav(audio_path, audio, mime_type, sample_rate, channels)
+        duration = _limit_voice_duration(audio_path, duration)
         music_path = work_dir / "inspirational-corporate.wav"
         _write_corporate_music(music_path, duration)
         _fit_scene_durations(script, duration)
         clip_paths = []
-        selected = [script["scenes"][i % len(script["scenes"])] for i in range(8)]
+        selected = [script["scenes"][i % len(script["scenes"])] for i in range(6)]
         for i, scene in enumerate(selected):
-            _visual_job_update(job_id, status="generating_visuals", progress=46+i*3, message=f"جاري إنشاء اللقطة السينمائية {i+1} من 8...", script=script)
+            _visual_job_update(job_id, status="generating_visuals", progress=46+i*4, message=f"جاري إنشاء اللقطة السينمائية {i+1} من 6...", script=script)
             clip_path = work_dir / f"ai-scene-{i+1}.mp4"
-            shot_direction = ["slow cinematic dolly-in", "controlled side tracking shot", "over-the-shoulder workstation shot", "wide establishing shot", "subtle orbit camera", "close-up hands and screen interaction", "low-angle professional hero shot", "smooth pull-back closing shot"][i]
-            _generate_veo_clip(_veo_prompt(scene, req) + f"\nShot {i+1} of 8. Camera direction: {shot_direction}. Make this composition visually distinct from the other shots.", clip_path); clip_paths.append(str(clip_path))
+            shot_direction = ["slow cinematic dolly-in", "controlled side tracking shot", "over-the-shoulder workstation shot", "wide establishing shot", "subtle orbit camera", "smooth pull-back closing shot"][i]
+            _generate_veo_clip(_veo_prompt(scene, req) + f"\nShot {i+1} of 6. Camera direction: {shot_direction}. Make this composition visually distinct from the other shots.", clip_path); clip_paths.append(str(clip_path))
         _visual_job_update(job_id, status="rendering", progress=75, message="جاري تركيب اللقطات والصوت والترجمة...", script=script)
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
         props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "clipPaths":clip_paths}, ensure_ascii=False), encoding="utf-8")
