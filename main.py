@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.16.1")
+app = FastAPI(title="GPT Cyber Content API", version="0.17.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -49,6 +49,7 @@ class ImageRequest(BaseModel):
     domain: str = "GRC"
     visual_style: Literal["GRC Professional", "Cyber Pulse", "Executive Minimal", "Infographic"] = "GRC Professional"
     visual_direction: str = ""
+    variant_index: int = Field(default=1, ge=1, le=3)
 
 class NewsParseRequest(BaseModel):
     title: str = Field(min_length=3, max_length=500)
@@ -183,9 +184,9 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.16.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.17.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
-        "news_artwork":"editorial-causal-v7", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "news_artwork":"three-choice-v8", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
     }
@@ -421,8 +422,16 @@ def visual_prompt(req: ImageRequest):
         zoom_contract = ""
         if "zoom" in story or "زووم" in story:
             zoom_contract = '''\nMANDATORY ZOOM ANNOTATION VISUAL CONTRACT: show a recognizable modern video-meeting scene with several participant tiles; a shared-screen canvas; a clearly visible annotation pen/drawing stroke/cursor acting on that shared canvas; and an unauthorized-control path spreading from the annotated shared screen toward two or more participant laptops/devices. Use red only for the hostile control path and cyan/blue for the legitimate meeting. A generic laptop, generic participant grid, large arrow, isolated user icon, update window, download screen, or single-device warning is NOT sufficient. Do not generate readable Zoom text or logos; communicate the platform through its familiar blue video-meeting visual language and meeting layout.\n'''
+        variant_contracts = {
+            1: "VARIANT 1 — DIRECT CAUSAL SCENE: use one dominant focal point and a clear visual path from the vulnerable technology/action to the impact.",
+            2: "VARIANT 2 — SPLIT EDITORIAL SCENE: use a clearly divided but cinematic source-versus-impact or before-versus-after composition, connected by the exact attack/risk mechanism.",
+            3: "VARIANT 3 — ENTERPRISE CONTEXT SCENE: place the exact technology and mechanism inside a realistic enterprise environment with people/devices where relevant, while keeping the technical cause and impact unmistakable.",
+        }
+        variant_contract = variant_contracts[req.variant_index]
         return f'''Create ONLY the visual background artwork for a premium cybersecurity news post. Before composing, identify the exact subject, affected technology/vendor category, event, and risk mechanism from the supplied title, context, and visual direction.
 FORMAT: vertical Instagram 4:5 portrait.
+{variant_contract}
+This composition must be substantially different from the other variants while preserving the same factual story and Cyber Pulse identity.
 BRAND VISUAL SYSTEM: deep black/dark navy #050B12, Cyber Blue #0A84FF, Cyan #00D1C7. Red only when the supplied risk is high/critical. Subtle circuit patterns, restrained digital grid, soft blue/cyan atmospheric glow. Premium enterprise cybersecurity media publication quality, sophisticated and minimal, never gaming-like.
 SEMANTIC ACCURACY IS THE HIGHEST PRIORITY: represent the news subject directly and literally. Every prominent object must be traceable to the supplied story. Show the affected technology and the reported action/risk in one coherent scene. Do not invent an unrelated visual metaphor. If the story is about software updates or security patches, show an update/patch deployment environment, recognizable software/platform geometry, prioritized critical update objects, protected enterprise devices or servers, and security status cues. Never translate "patch", "leak", "bug", "cloud", "virus", "worm", "gateway", or similar technical terms into unrelated physical objects unless the supplied story is actually about those physical objects.
 STRICT COMPOSITION: Build a cinematic explanatory editorial scene, not a generic stock-style cybersecurity image. The scene must visually tell the incident in one glance: affected platform/context -> vulnerable feature or action -> visible impact on the affected devices. Use depth, clear focal hierarchy, realistic enterprise people/devices where relevant, and precise cyan-versus-red visual causality. Concentrate the explanatory action in the center/lower 55-60%. Preserve a genuinely empty, dark, low-detail text-safe editorial panel across the upper 35-40%; no faces, bright objects, interface panels, attack paths, or important details may enter that panel. Keep additional safe space at the top-right for the Cyber Pulse logo.
@@ -489,28 +498,10 @@ def generate_image(req: ImageRequest):
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         base_prompt = visual_prompt(req)
         image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-        max_attempts = max(1, min(4, int(os.getenv("IMAGE_MAX_ATTEMPTS", "3"))))
-        generation_prompt = base_prompt
-        image_b64 = ""
-        attempts = 0
+        image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
         try:
-            review = None
-            while attempts < max_attempts:
-                image_b64 = client.images.generate(model=image_model, prompt=generation_prompt, size="1024x1536").data[0].b64_json
-                attempts += 1
-                review = review_artwork(client, req, image_b64)
-                if review["semantic_match"] or attempts >= max_attempts:
-                    break
-                correction = str(review.get("retry_direction", "")).strip()
-                generation_prompt = base_prompt + f'''\n\nTHE PREVIOUS IMAGE WAS REJECTED BY VISUAL QUALITY CONTROL.
-REVIEW SCORE: {review['score']}/100.
-REJECTION ISSUES: {json.dumps(review.get('issues', []), ensure_ascii=False)}
-MANDATORY CORRECTION: {correction or "Make the affected technology and exact attack mechanism unmistakable; remove generic or unrelated elements."}
-Create a substantially different and improved composition, not a minor variation. Follow only the current story; do not introduce update or download imagery unless explicitly present in the news.'''
+            review = review_artwork(client, req, image_b64)
         except Exception as review_error:
-            if not image_b64:
-                image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
-                attempts += 1
             review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
-        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"editorial-causal-v7","generation_attempts":attempts,"semantic_review":review}
+        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"three-choice-v8","generation_attempts":1,"variant_index":req.variant_index,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
