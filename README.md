@@ -18,6 +18,9 @@ AI content studio for cybersecurity, GRC, AI governance and privacy content.
 4. Optional variables:
    - `OPENAI_MODEL=gpt-5`
    - `OPENAI_IMAGE_MODEL=gpt-image-1`
+   - `GEMINI_API_KEY` for Nano Banana images and Visual Alert Editor voice-over
+   - `GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview` (optional and replaceable)
+   - `GEMINI_TTS_VOICE=Charon` (optional)
    - `BYTEZ_API_KEY` to enable cybersecurity news video generation
    - `BYTEZ_VIDEO_MODEL` is optional. If omitted, the app automatically selects an available Bytez `text-to-video` model. Set it only to a model ID returned for your Bytez account.
 5. Deploy and generate a public Railway domain.
@@ -40,5 +43,8 @@ The OpenAI API key must never be placed in `index.html`. Keep it in Railway Vari
 - `POST /api/generate-image`
 - `POST /api/news-video`
 - `GET /api/news-video/{job_id}`
+- `POST /api/visual-alert/render`
+- `GET /api/visual-alert/status/{job_id}`
+- `GET /api/visual-alert/video/{job_id}`
 
 If `OPENAI_API_KEY` is missing, content generation returns Demo Mode so the UI can still be tested.
