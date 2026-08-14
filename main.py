@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.29.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.30.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -203,7 +203,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.29.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.30.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -211,7 +211,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"hybrid-veo-nano-six-scenes-v7", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"three-video-three-image-v8", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -310,6 +310,15 @@ def _generate_veo_clip(prompt: str, output_path: Path):
                 ensure_ok(video, "تنزيل الفيديو"); output_path.write_bytes(video.content); return
             time.sleep(10)
     raise ValueError("انتهت مهلة انتظار توليد فيديو Veo")
+
+def _split_veo_clip(source: Path, work_dir: Path) -> list[str]:
+    clips = []
+    for i, (start, length) in enumerate(((0.0, 2.7), (2.7, 2.7), (5.4, 2.6)), 1):
+        target = work_dir / f"veo-segment-{i}.mp4"
+        result = subprocess.run(["ffmpeg", "-y", "-ss", str(start), "-i", str(source), "-t", str(length), "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", str(target)], capture_output=True, text=True, timeout=180)
+        if result.returncode != 0 or not target.exists(): raise ValueError("تعذر تقسيم مقطع Veo إلى ثلاثة مشاهد")
+        clips.append(str(target))
+    return clips
 
 def _extract_gemini_audio(payload: Any) -> tuple[bytes, str, int, int] | None:
     """Find audio in both the current Interactions REST schema and legacy responses."""
@@ -462,15 +471,15 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         clip_paths, image_paths = [], []
         selected = [script["scenes"][i % len(script["scenes"])] for i in range(6)]
         _visual_job_update(job_id, status="generating_visuals", progress=46, message="جاري إنشاء مقطع Veo السينمائي الوحيد...", script=script)
-        clip_path = work_dir / "ai-scene-1.mp4"
+        clip_path = work_dir / "veo-source.mp4"
         try:
             _generate_veo_clip(_veo_prompt(selected[0], req) + "\nOpening hero shot. Slow cinematic dolly-in. Make it suitable as the main motion clip.", clip_path)
-            clip_paths.append(str(clip_path)); first_image = 1
+            clip_paths.extend(_split_veo_clip(clip_path, work_dir)); image_indices = range(3, 6)
         except Exception as veo_error:
             if "429" not in str(veo_error) and "quota" not in str(veo_error).lower(): raise
-            first_image = 0
+            image_indices = range(6)
             _visual_job_update(job_id, message="حصة Veo مستخدمة اليوم؛ سيتم إكمال الفيديو بصور سينمائية متحركة.", veo_fallback=str(veo_error)[:500])
-        for i in range(first_image, 6):
+        for i in image_indices:
             _visual_job_update(job_id, status="generating_visuals", progress=50+i*4, message=f"جاري إنشاء المشهد السينمائي {i+1} من 6...", script=script)
             image_b64, _ = generate_nano_banana_image(_cinematic_still_prompt(selected[i], req, i), "9:16")
             image_path = work_dir / f"ai-scene-{i+1}.jpg"
