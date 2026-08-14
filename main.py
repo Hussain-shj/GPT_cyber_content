@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.17.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.18.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -184,7 +184,10 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.17.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.18.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
+        "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
+        "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"structured-v3",
         "news_artwork":"three-choice-v8", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
@@ -491,17 +494,69 @@ Set semantic_match=true only when score is at least 82 and technology_visible, m
     )
     return review
 
+def _find_gemini_image_data(value: Any) -> str:
+    if isinstance(value, dict):
+        output_image = value.get("output_image")
+        if isinstance(output_image, dict) and output_image.get("data"):
+            return str(output_image["data"])
+        if value.get("type") == "image" and value.get("data"):
+            return str(value["data"])
+        for child in value.values():
+            found = _find_gemini_image_data(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_gemini_image_data(child)
+            if found:
+                return found
+    return ""
+
+def generate_nano_banana_image(prompt: str) -> tuple[str, str]:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not configured")
+    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
+    payload = {
+        "model": model,
+        "input": [{"type": "text", "text": prompt}],
+        "response_format": {
+            "type": "image",
+            "mime_type": "image/png",
+            "aspect_ratio": "4:5",
+            "image_size": os.getenv("GEMINI_IMAGE_SIZE", "1K"),
+        },
+    }
+    with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
+        response = client.post(
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+        if not response.is_success:
+            try:
+                detail = response.json().get("error", {}).get("message", response.text)
+            except Exception:
+                detail = response.text
+            raise ValueError(f"Nano Banana request failed ({response.status_code}): {str(detail)[:500]}")
+        data = response.json()
+    image_b64 = _find_gemini_image_data(data)
+    if not image_b64:
+        raise ValueError("Nano Banana returned no image data")
+    return image_b64, model
+
 @app.post("/api/generate-image")
 def generate_image(req: ImageRequest):
-    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
+    if not os.getenv("GEMINI_API_KEY"): raise HTTPException(400, "GEMINI_API_KEY is not configured")
     try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         base_prompt = visual_prompt(req)
-        image_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-        image_b64 = client.images.generate(model=image_model, prompt=base_prompt, size="1024x1536").data[0].b64_json
-        try:
-            review = review_artwork(client, req, image_b64)
-        except Exception as review_error:
-            review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
-        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"three-choice-v8","generation_attempts":1,"variant_index":req.variant_index,"semantic_review":review}
+        image_b64, image_model = generate_nano_banana_image(base_prompt)
+        if os.getenv("OPENAI_API_KEY"):
+            try:
+                review = review_artwork(OpenAI(api_key=os.getenv("OPENAI_API_KEY")), req, image_b64)
+            except Exception as review_error:
+                review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
+        else:
+            review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"لم تُنفذ المراجعة البصرية لأن OPENAI_API_KEY غير مهيأ."}
+        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"nano-banana-three-choice-v9","generation_attempts":1,"variant_index":req.variant_index,"image_provider":"google_nano_banana_2","image_model":image_model,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
