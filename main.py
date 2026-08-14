@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.19.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.20.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -185,7 +185,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.19.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.20.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -391,11 +391,16 @@ def demo_payload(req):
 def generate_content(req: ContentRequest):
     if not os.getenv("OPENAI_API_KEY"): return demo_payload(req)
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")); model = os.getenv("OPENAI_MODEL", "gpt-5")
-    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides."
+    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides."
     kw = {"model":model,"input":prompt,"store":False}
     if req.use_web_search: kw["tools"]=[{"type":"web_search"}]
     try:
-        d = extract_json(client.responses.create(**kw).output_text); d["mode"]="openai"; return d
+        d = extract_json(client.responses.create(**kw).output_text)
+        for slide in d.get("slides", []):
+            for field, limit in (("headline", 9), ("body", 32)):
+                words = str(slide.get(field, "")).split()
+                slide[field] = " ".join(words[:limit]) + ("…" if len(words) > limit else "")
+        d["mode"]="openai"; return d
     except Exception as e: raise HTTPException(500, f"Generation failed: {e}")
 
 @app.post("/api/parse-news")
@@ -512,8 +517,8 @@ NEWS TITLE: {req.title}
 FACTUAL CONTEXT: {req.body}
 {zoom_contract}
 Final self-check before rendering: (1) would a viewer identify the technology and event without reading the headline, (2) can the viewer follow the attack or risk mechanism from its origin to its impact, and (3) does the image have a clear editorial hierarchy rather than merely containing the right objects? If any answer is no, revise before rendering.'''
-    common = f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, hashtags, watermarks or pseudo-text. Leave typography zones empty. {req.visual_direction}"
-    if req.domain.strip().upper() == "GRC": style = "Premium light government/enterprise GRC infographic artwork; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; polished enterprise vector/semi-3D icons; generous whitespace; no hacker clichés."
+    common = f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, headings, framework names, interface copy, hashtags, watermarks or pseudo-text. Do not create a labeled infographic, poster, slide, diagram with captions, or text-bearing UI. Reserve the top 28% as a clean low-detail typography-safe zone and the bottom 22% as another clean low-detail typography-safe zone. Place the single main visual subject only in the central 50%, fully visible and not cropped. {req.visual_direction}"
+    if req.domain.strip().upper() == "GRC": style = "Premium light government/enterprise GRC editorial illustration; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; one strong central symbolic scene using polished enterprise vector/semi-3D objects; no internal labels, no multi-panel infographic, no repeated mini diagrams, generous whitespace, no hacker clichés."
     elif req.visual_style == "Executive Minimal": style = "Executive minimal artwork, white background, navy/blue, strong central metaphor, whitespace."
     else: style = "Structured professional infographic artwork, light background, central concept and restrained supporting visuals."
     return style + "\n" + common
