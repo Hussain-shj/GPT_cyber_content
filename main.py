@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.25.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.25.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -202,7 +202,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.25.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.25.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -270,25 +270,32 @@ Show culturally accurate adult Emirati professionals where people are relevant: 
 
 def _generate_veo_clip(prompt: str, output_path: Path):
     api_key = os.environ["GEMINI_API_KEY"]
-    base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    base = "https://generativelanguage.googleapis.com/v1beta"
     model = os.getenv("GEMINI_VIDEO_MODEL", "veo-3.1-fast-generate-preview")
-    extra = {"aspect_ratio":"9:16", "resolution":"720p", "duration_seconds":6, "style":"cinematic", "person_generation":"allow_adult", "negative_prompt":"text, logos, captions, watermark, distorted anatomy, extra fingers, hooded hacker, shaky camera"}
-    headers = {"Authorization":f"Bearer {api_key}"}
+    headers = {"x-goog-api-key":api_key, "Content-Type":"application/json"}
+    def ensure_ok(response: httpx.Response, stage: str):
+        if response.is_success: return
+        try:
+            body = response.json(); detail = (body.get("error") or {}).get("message") or str(body.get("error") or body)
+        except Exception:
+            detail = response.text[:900]
+        raise ValueError(f"فشل Veo أثناء {stage} (HTTP {response.status_code}): {detail[:900]}")
     with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0), follow_redirects=True) as client:
-        created = client.post(f"{base}/videos", headers=headers, data={"model":model, "prompt":prompt, "extra_body":json.dumps(extra)})
-        created.raise_for_status(); operation = created.json()
-        video_id = operation.get("id") or operation.get("name")
-        if not video_id: raise ValueError("لم يُرجع Gemini معرّف عملية فيديو")
+        created = client.post(f"{base}/models/{model}:predictLongRunning", headers=headers, json={"instances":[{"prompt":prompt}], "parameters":{"aspectRatio":"9:16", "resolution":"720p"}})
+        ensure_ok(created, "بدء توليد الفيديو"); operation = created.json()
+        operation_name = operation.get("name")
+        if not operation_name: raise ValueError("لم يُرجع Gemini معرّف عملية فيديو")
         deadline = time.time() + 720
         while time.time() < deadline:
-            status = client.get(f"{base}/videos/{video_id}", headers=headers)
-            status.raise_for_status(); data = status.json(); state = str(data.get("status", "")).lower()
-            if state == "failed": raise ValueError("فشل توليد لقطة Veo: " + str(data.get("error") or "سبب غير معروف")[:700])
-            if state == "completed":
-                url = data.get("url") or (data.get("video") or {}).get("url")
-                if not url: raise ValueError("اكتمل Veo دون رابط فيديو")
-                video = client.get(url, headers={**headers, "x-goog-api-key":api_key})
-                video.raise_for_status(); output_path.write_bytes(video.content); return
+            status = client.get(f"{base}/{operation_name}", headers=headers)
+            ensure_ok(status, "متابعة حالة الفيديو"); data = status.json()
+            if data.get("done"):
+                if data.get("error"): raise ValueError("فشل توليد لقطة Veo: " + str((data["error"] or {}).get("message") or data["error"])[:900])
+                samples = (((data.get("response") or {}).get("generateVideoResponse") or {}).get("generatedSamples") or [])
+                url = (((samples[0] if samples else {}).get("video") or {}).get("uri"))
+                if not url: raise ValueError("اكتمل Veo دون رابط فيديو صالح")
+                video = client.get(url, headers={"x-goog-api-key":api_key})
+                ensure_ok(video, "تنزيل الفيديو"); output_path.write_bytes(video.content); return
             time.sleep(10)
     raise ValueError("انتهت مهلة انتظار توليد فيديو Veo")
 
