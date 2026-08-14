@@ -7,8 +7,13 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import uuid
 import threading
+import tempfile
+import time
+import wave
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,12 +29,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.22.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.23.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
 MOBILE_JS = BASE_DIR / "mobile-download.js"
 NEWS_SEARCH_JS = BASE_DIR / "news-search.js"
+VISUAL_ALERT_JS = BASE_DIR / "visual-alert.js"
 CYBER_SOURCES_FILE = BASE_DIR / "cyber_sources.json"
 AUTH_EXEMPT_PATHS = {"/health"}
 
@@ -70,6 +76,11 @@ class NewsVideoRequest(BaseModel):
     style: Literal["Breaking News", "Cyber Awareness", "GRC"] = "Breaking News"
     duration: Literal[5, 10, 15] = 5
 
+class VisualAlertRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=500)
+    content: str = Field(min_length=10, max_length=12000)
+    required_action: str = Field(min_length=3, max_length=4000)
+
 class ArchivePost(BaseModel):
     id: str | None = None
     topic_id: int | None = None
@@ -83,6 +94,8 @@ def database_url(): return os.getenv("DATABASE_URL")
 
 VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 VIDEO_JOBS_LOCK = threading.Lock()
+VISUAL_ALERT_JOBS: dict[str, dict[str, Any]] = {}
+VISUAL_ALERT_JOBS_LOCK = threading.Lock()
 def db_conn():
     if not database_url(): raise HTTPException(503, "DATABASE_URL is not configured")
     return psycopg.connect(database_url(), row_factory=dict_row)
@@ -182,20 +195,152 @@ def web_app(): return FileResponse(INDEX_FILE, media_type="text/html")
 def mobile_js():
     base = MOBILE_JS.read_text(encoding="utf-8") if MOBILE_JS.exists() else ""
     search = NEWS_SEARCH_JS.read_text(encoding="utf-8") if NEWS_SEARCH_JS.exists() else ""
-    return Response(content=base + "\n\n" + search, media_type="application/javascript", headers={"Cache-Control":"no-store, max-age=0"})
+    visual_alert = VISUAL_ALERT_JS.read_text(encoding="utf-8") if VISUAL_ALERT_JS.exists() else ""
+    return Response(content=base + "\n\n" + search + "\n\n" + visual_alert, media_type="application/javascript", headers={"Cache-Control":"no-store, max-age=0"})
 
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.22.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.23.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
         "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"source-date-verified-v4",
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
-        "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic")
+        "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
+        "visual_alert_editor":"mvp-v1", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
     }
+
+def _visual_job_update(job_id: str, **values):
+    with VISUAL_ALERT_JOBS_LOCK:
+        if job_id in VISUAL_ALERT_JOBS: VISUAL_ALERT_JOBS[job_id].update(values)
+
+def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    prompt = f'''You are a professional cybersecurity short-form video editor.
+Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
+Target 30-50 seconds, maximum 55 seconds. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text.
+Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, visualSuggestion. The required action must be communicated clearly near the end.
+
+ALERT TITLE:
+{req.title}
+
+ALERT CONTENT:
+{req.content}
+
+REQUIRED ACTION:
+{req.required_action}'''
+    raw = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text
+    data = extract_json(raw)
+    scenes = data.get("scenes") if isinstance(data, dict) else None
+    if not isinstance(scenes, list) or not scenes: raise ValueError("لم يُرجع OpenAI مشاهد صالحة")
+    clean = []
+    for i, scene in enumerate(scenes[:8]):
+        if not isinstance(scene, dict): continue
+        clean.append({
+            "id":f"scene-{i+1}", "type":str(scene.get("type", "content"))[:30],
+            "duration":max(3, min(15, int(scene.get("duration", 6)))),
+            "onScreenText":" ".join(str(scene.get("onScreenText", "")).split()[:9]),
+            "voiceText":str(scene.get("voiceText", "")).strip()[:700],
+            "visualSuggestion":str(scene.get("visualSuggestion", "")).strip()[:500],
+        })
+    if not clean: raise ValueError("تعذر تكوين مشاهد الفيديو")
+    return {"videoTitle":str(data.get("videoTitle", req.title))[:300], "scenes":clean}
+
+def _gemini_tts(script: dict[str, Any]) -> bytes:
+    transcript = "\n".join(s["voiceText"] for s in script["scenes"] if s.get("voiceText"))
+    if not transcript: raise ValueError("سيناريو التعليق الصوتي فارغ")
+    instruction = f'''Read the following Arabic cybersecurity alert in a natural professional UAE/Emirati speaking style.
+Male voice. Calm, confident cybersecurity news presenter. Moderate pace, clear Arabic pronunciation, no exaggerated emotion. Keep English product names and cybersecurity terms clearly pronounced. Read only the transcript, without adding any words.
+
+TRANSCRIPT:
+{transcript}'''
+    model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+    with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
+        response = client.post(
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
+            headers={"x-goog-api-key":os.environ["GEMINI_API_KEY"], "Content-Type":"application/json"},
+            json={"model":model, "input":instruction, "response_format":{"type":"audio"}, "generation_config":{"speech_config":[{"voice":os.getenv("GEMINI_TTS_VOICE", "Charon")}]}},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    audio = payload.get("output_audio", {}).get("data")
+    if not audio: raise ValueError("لم يُرجع Gemini بيانات صوتية")
+    return base64.b64decode(audio)
+
+def _write_wav(path: Path, pcm: bytes) -> float:
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(24000); wf.writeframes(pcm)
+    with wave.open(str(path), "rb") as wf:
+        return wf.getnframes() / float(wf.getframerate())
+
+def _fit_scene_durations(script: dict[str, Any], audio_duration: float):
+    if audio_duration > 58: raise ValueError("التعليق الصوتي تجاوز الحد المناسب لفيديو 59 ثانية؛ اختصر محتوى التنبيه ثم أعد المحاولة")
+    scenes = script["scenes"]
+    weights = [max(1, len(s.get("voiceText", "").split())) for s in scenes]
+    total = sum(weights)
+    target = min(59.0, max(18.0, audio_duration + 1.0))
+    remaining = target
+    for i, scene in enumerate(scenes):
+        duration = remaining if i == len(scenes)-1 else max(2.5, target * weights[i] / total)
+        scene["duration"] = round(duration, 2); remaining -= duration
+    script["estimatedDuration"] = round(target, 2)
+
+def _cleanup_visual_jobs():
+    cutoff = time.time() - 3600
+    expired = []
+    with VISUAL_ALERT_JOBS_LOCK:
+        for job_id, job in VISUAL_ALERT_JOBS.items():
+            if job.get("created_ts", time.time()) < cutoff: expired.append((job_id, job.get("work_dir")))
+        for job_id, _ in expired: VISUAL_ALERT_JOBS.pop(job_id, None)
+    for _, folder in expired:
+        if folder: shutil.rmtree(folder, ignore_errors=True)
+
+def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
+    work_dir = Path(tempfile.mkdtemp(prefix=f"cyberpulse-alert-{job_id[:8]}-"))
+    _visual_job_update(job_id, work_dir=str(work_dir), status="analyzing", progress=12, message="جاري تحليل التنبيه...")
+    try:
+        script = _visual_script(req)
+        _visual_job_update(job_id, status="generating_voice", progress=38, message="جاري إنشاء التعليق الصوتي...", script=script)
+        pcm = _gemini_tts(script)
+        audio_path = work_dir / "voiceover.wav"
+        duration = _write_wav(audio_path, pcm)
+        _fit_scene_durations(script, duration)
+        _visual_job_update(job_id, status="rendering", progress=65, message="جاري مزامنة الصوت وتجهيز الفيديو...", script=script)
+        props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path)}, ensure_ascii=False), encoding="utf-8")
+        result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
+        _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
+    except Exception as exc:
+        _visual_job_update(job_id, status="failed", message=str(exc)[:1400], detail=str(exc)[:1400], completed_at=datetime.now(timezone.utc).isoformat())
+
+@app.post("/api/visual-alert/render", status_code=202)
+def create_visual_alert(req: VisualAlertRequest):
+    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
+    if not os.getenv("GEMINI_API_KEY"): raise HTTPException(400, "GEMINI_API_KEY is not configured")
+    _cleanup_visual_jobs()
+    job_id = str(uuid.uuid4())
+    with VISUAL_ALERT_JOBS_LOCK:
+        VISUAL_ALERT_JOBS[job_id] = {"id":job_id, "status":"pending", "progress":3, "message":"تم إنشاء المهمة", "created_ts":time.time(), "created_at":datetime.now(timezone.utc).isoformat()}
+    threading.Thread(target=_run_visual_alert_job, args=(job_id, req), daemon=True).start()
+    return {"id":job_id, "status":"pending", "progress":3, "message":"تم إنشاء المهمة"}
+
+@app.get("/api/visual-alert/status/{job_id}")
+def visual_alert_status(job_id: str):
+    with VISUAL_ALERT_JOBS_LOCK:
+        job = VISUAL_ALERT_JOBS.get(job_id)
+        if not job: raise HTTPException(404, "المهمة غير موجودة أو انتهت صلاحيتها")
+        return {k:v for k,v in job.items() if k not in {"work_dir", "created_ts"}}
+
+@app.get("/api/visual-alert/video/{job_id}")
+def visual_alert_video(job_id: str):
+    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
+    if not job or job.get("status") != "completed": raise HTTPException(404, "الفيديو غير جاهز")
+    path = Path(job["work_dir"]) / "visual-alert.mp4"
+    if not path.exists(): raise HTTPException(404, "انتهت صلاحية ملف الفيديو")
+    return FileResponse(path, media_type="video/mp4", filename=f"cyberpulse-alert-{job_id[:8]}.mp4")
 
 def _video_url(output: Any) -> str:
     if isinstance(output, str):
