@@ -173,6 +173,7 @@
     DARK =
       "https://raw.githubusercontent.com/Hussain-shj/GPT_cyber_content/main/cyberpulse-logo-dark.svg";
   let art = "",
+    artMime = "image/jpeg",
     artOptions = [],
     selectedArtIndex = null,
     parsed = null,
@@ -281,6 +282,7 @@
     if (!parsed) return;
     ready = false;
     art = "";
+    artMime = "image/jpeg";
     artOptions = [];
     selectedArtIndex = null;
     visualReview = null;
@@ -326,7 +328,7 @@
       .map((option, index) => {
         const review = option.semantic_review || {};
         const score = review.score == null ? "غير متاح" : `${review.score}/100`;
-        return `<article class="news-option ${selectedArtIndex === index ? "selected" : ""}" data-news-option="${index}"><img src="data:image/png;base64,${option.b64_json}" alt="التصميم ${index + 1}"><div class="news-option-info"><b>التصميم ${index + 1} — ${esc(score)}</b><small>${esc(review.summary_ar || "مراجعة بصرية غير متاحة.")}</small><button type="button">${selectedArtIndex === index ? "✓ تم اختيار الصورة" : "اختيار هذه الصورة"}</button></div></article>`;
+        return `<article class="news-option ${selectedArtIndex === index ? "selected" : ""}" data-news-option="${index}"><img src="data:${esc(option.mime_type || "image/jpeg")};base64,${option.b64_json}" alt="التصميم ${index + 1}"><div class="news-option-info"><b>التصميم ${index + 1} — ${esc(score)}</b><small>${esc(review.summary_ar || "مراجعة بصرية غير متاحة.")}</small><button type="button">${selectedArtIndex === index ? "✓ تم اختيار الصورة" : "اختيار هذه الصورة"}</button></div></article>`;
       })
       .join("")}</div>`;
     q("newsResult")
@@ -342,6 +344,7 @@
     if (!option) return;
     selectedArtIndex = index;
     art = option.b64_json;
+    artMime = option.mime_type || "image/jpeg";
     visualReview = option.semantic_review || null;
     ready = false;
     renderArtOptions();
@@ -361,7 +364,7 @@
       )
       .join("");
     q("newsResult").innerHTML =
-      `<div class="news-stage"><img class="hero" src="data:image/png;base64,${art}"><div class="news-overlay"></div><img class="news-logo" src="${DARK}"><div class="news-content"><div class="news-head">${esc(parsed.headline)}</div>${badges ? `<div class="news-badges">${badges}</div>` : ""}${parsed.source ? `<div class="news-source">المصدر: <span style="color:#00D1C7">${esc(parsed.source)}</span></div>` : ""}</div></div>`;
+      `<div class="news-stage"><img class="hero" src="data:${esc(artMime)};base64,${art}"><div class="news-overlay"></div><img class="news-logo" src="${DARK}"><div class="news-content"><div class="news-head">${esc(parsed.headline)}</div>${badges ? `<div class="news-badges">${badges}</div>` : ""}${parsed.source ? `<div class="news-source">المصدر: <span style="color:#00D1C7">${esc(parsed.source)}</span></div>` : ""}</div></div>`;
     q("newsSave").classList.remove("hidden");
     q("newsShare").classList.remove("hidden");
     q("newsMsg").textContent =
@@ -383,7 +386,7 @@
   async function finalJpeg() {
     if (!ready) throw Error("اضغط إنشاء الخبر أولاً");
     await document.fonts?.ready;
-    let im = await load("data:image/png;base64," + art),
+    let im = await load(`data:${artMime};base64,${art}`),
       c = document.createElement("canvas");
     c.width = W;
     c.height = H;
