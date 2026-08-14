@@ -1,0 +1,9 @@
+providers = ["python", "node"]
+
+[phases.setup]
+nixPkgs = ["...", "ffmpeg"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+NPM_CONFIG_FUND = "false"
+NPM_CONFIG_AUDIT = "false"
