@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.18.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.18.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -184,7 +184,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.18.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.18.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -480,7 +480,7 @@ Set semantic_match=true only when score is at least 82 and technology_visible, m
         model=os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-5")),
         input=[{"role":"user","content":[
             {"type":"input_text","text":review_prompt},
-            {"type":"input_image","image_url":f"data:image/png;base64,{image_b64}"},
+            {"type":"input_image","image_url":f"data:image/jpeg;base64,{image_b64}"},
         ]}],
         store=False,
     )
@@ -522,7 +522,7 @@ def generate_nano_banana_image(prompt: str) -> tuple[str, str]:
         "input": [{"type": "text", "text": prompt}],
         "response_format": {
             "type": "image",
-            "mime_type": "image/png",
+            "mime_type": "image/jpeg",
             "aspect_ratio": "4:5",
             "image_size": os.getenv("GEMINI_IMAGE_SIZE", "1K"),
         },
@@ -558,5 +558,5 @@ def generate_image(req: ImageRequest):
                 review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
         else:
             review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"لم تُنفذ المراجعة البصرية لأن OPENAI_API_KEY غير مهيأ."}
-        return {"b64_json":image_b64,"slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"nano-banana-three-choice-v9","generation_attempts":1,"variant_index":req.variant_index,"image_provider":"google_nano_banana_2","image_model":image_model,"semantic_review":review}
+        return {"b64_json":image_b64,"mime_type":"image/jpeg","slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"nano-banana-three-choice-v9","generation_attempts":1,"variant_index":req.variant_index,"image_provider":"google_nano_banana_2","image_model":image_model,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
