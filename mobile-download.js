@@ -63,27 +63,27 @@
     x.direction = "rtl";
     x.textAlign = "right";
     x.fillStyle = "rgba(255,255,255,.91)";
-    x.fillRect(55, 140, 970, 220);
+    x.fillRect(55, 135, 970, 185);
     x.fillStyle = "#0a2454";
-    x.font = "800 54px Cairo";
+    x.font = "800 48px Cairo";
     wrap(x, s.headline, 900)
-      .slice(0, 3)
-      .forEach((v, n) => x.fillText(bidi(v), 970, 170 + n * 70));
+      .slice(0, 2)
+      .forEach((v, n) => x.fillText(bidi(v), 970, 165 + n * 62));
     x.fillStyle = "rgba(255,255,255,.9)";
-    x.fillRect(500, 390, 525, 360);
+    x.fillRect(55, 1010, 970, 225);
     x.fillStyle = "#172b48";
-    x.font = "600 31px Cairo";
-    wrap(x, s.body, 490)
-      .slice(0, 6)
-      .forEach((v, n) => x.fillText(bidi(v), 975, 425 + n * 48));
+    x.font = "600 28px Cairo";
+    wrap(x, s.body, 900)
+      .slice(0, 4)
+      .forEach((v, n) => x.fillText(bidi(v), 970, 1042 + n * 43));
     x.fillStyle = "rgba(255,255,255,.92)";
-    x.fillRect(260, 1243, 705, 72);
+    x.fillRect(260, 1255, 705, 60);
     x.fillStyle = "#102b61";
     x.font = "700 27px Cairo";
     x.fillText(
       "نبض سيبراني | \u2066GRC\u2069 | \u2066@cyberpulse_ar\u2069",
       930,
-      1285,
+      1292,
     );
     return c.toDataURL("image/jpeg", 0.94);
   }
