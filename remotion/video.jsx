@@ -2,42 +2,22 @@ import React from "react";
 import {AbsoluteFill, interpolate, Sequence, spring, useCurrentFrame, useVideoConfig} from "remotion";
 import {Audio} from "@remotion/media";
 
-const palette = {navy:"#020a14", blue:"#0a84ff", cyan:"#1bd3cf", white:"#f4f9ff", muted:"#9eb2c9"};
+const P={navy:"#020a14",blue:"#0a84ff",cyan:"#1bd3cf",white:"#f4f9ff",risk:"#ff4d67"};
 
-const BackgroundEffects = () => {
-  const frame = useCurrentFrame();
-  return <AbsoluteFill style={{background:`radial-gradient(circle at ${30 + (frame % 90) / 3}% 30%,#0a3a6688,transparent 35%),linear-gradient(160deg,#02070d,#061a2d 58%,#02070d)`,overflow:"hidden"}}>
-    <div style={{position:"absolute",inset:0,opacity:.16,backgroundImage:"linear-gradient(#1bd3cf55 1px,transparent 1px),linear-gradient(90deg,#1bd3cf55 1px,transparent 1px)",backgroundSize:"72px 72px",transform:`translateY(${frame % 72}px)`}} />
-    <div style={{position:"absolute",left:-180,top:280,width:520,height:520,border:`3px solid ${palette.blue}55`,borderRadius:"50%",boxShadow:`0 0 100px ${palette.blue}44`}} />
-  </AbsoluteFill>;
-};
+const Background=()=>{const f=useCurrentFrame();return <AbsoluteFill style={{background:`radial-gradient(circle at ${26+Math.sin(f/45)*10}% 26%,#0a3a6688,transparent 38%),linear-gradient(155deg,#02070d,#061a2d 58%,#02070d)`,overflow:"hidden"}}><div style={{position:"absolute",inset:0,opacity:.14,backgroundImage:"linear-gradient(#1bd3cf55 1px,transparent 1px),linear-gradient(90deg,#1bd3cf55 1px,transparent 1px)",backgroundSize:"72px 72px",transform:`translate(${f%72}px,${f%72}px)`}}/>{[0,1,2].map(i=><i key={i} style={{position:"absolute",left:80+i*340,top:310+i*170,width:10,height:10,borderRadius:"50%",background:P.cyan,boxShadow:`0 0 25px ${P.cyan}`,opacity:.5+.4*Math.sin((f+i*18)/15)}}/>)}</AbsoluteFill>};
 
-const Scene = ({scene, index}) => {
-  const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
-  const enter = spring({frame,fps,config:{damping:16,stiffness:110}});
-  const scan = interpolate(frame,[0,90],[0,1],{extrapolateRight:"clamp"});
-  const label = scene.type === "action" ? "الإجراء المطلوب" : scene.type === "intro" ? "نبض سيبراني" : "تنبيه سيبراني";
-  return <AbsoluteFill style={{direction:"rtl",fontFamily:"Cairo,Arial,sans-serif",color:palette.white,padding:"190px 92px 260px",justifyContent:"center",textAlign:"right"}}>
-    <div style={{color:palette.cyan,fontSize:34,fontWeight:800,marginBottom:34,opacity:enter,letterSpacing:1}}>{label}</div>
-    <div style={{fontSize:76,fontWeight:900,lineHeight:1.35,transform:`translateY(${(1-enter)*70}px) scale(${.94 + enter*.06})`,opacity:enter,textShadow:"0 8px 36px #000"}}>{scene.onScreenText}</div>
-    <div style={{width:`${scan*100}%`,height:7,marginTop:46,background:`linear-gradient(90deg,${palette.cyan},${palette.blue})`,borderRadius:8,boxShadow:`0 0 24px ${palette.cyan}`}} />
-    <div style={{position:"absolute",right:92,bottom:155,left:92,color:palette.white,fontSize:38,fontWeight:700,lineHeight:1.55,textAlign:"center",background:"#020b16dd",border:`1px solid ${palette.cyan}66`,padding:"22px 30px",borderRadius:18}}>{scene.voiceText}</div>
-    <div style={{position:"absolute",top:70,right:78,fontSize:30,fontWeight:900,color:palette.white}}>نبض سيبراني <span style={{color:palette.cyan}}>| CYBER PULSE</span></div>
-    <div style={{position:"absolute",bottom:72,right:92,left:92,height:8,background:"#ffffff22",borderRadius:10}}><div style={{height:"100%",width:`${((index+1)/6)*100}%`,maxWidth:"100%",background:palette.cyan,borderRadius:10}} /></div>
-  </AbsoluteFill>;
-};
+const Monitor=({x,y,w=330,delay=0,alert=false})=>{const f=useCurrentFrame();const bars=[.62,.84,.45,.72];return <div style={{position:"absolute",left:x,top:y,width:w,transform:`translateY(${Math.sin((f+delay)/22)*8}px) perspective(800px) rotateY(-7deg)`}}><div style={{height:w*.62,border:"6px solid #173d5d",borderRadius:22,background:"linear-gradient(145deg,#06111f,#0b2942)",boxShadow:`0 0 48px ${alert?P.risk:P.blue}55`,padding:24,overflow:"hidden"}}><div style={{display:"flex",gap:9,marginBottom:20}}>{[0,1,2].map(i=><span key={i} style={{width:11,height:11,borderRadius:"50%",background:i===0&&alert?P.risk:P.cyan,opacity:.55+i*.2}}/>)}</div><div style={{display:"flex",alignItems:"end",gap:12,height:90}}>{bars.map((b,i)=><div key={i} style={{flex:1,height:`${b*100}%`,background:`linear-gradient(${P.cyan},${P.blue})`,borderRadius:7,transform:`scaleY(${interpolate((f+delay+i*8)%70,[0,35,70],[.65,1,.65])})`,transformOrigin:"bottom"}}/>)}</div><div style={{height:4,marginTop:24,background:`linear-gradient(90deg,${alert?P.risk:P.cyan} ${f%100}%,#17334a ${f%100}%)`,boxShadow:`0 0 14px ${alert?P.risk:P.cyan}`}}/></div><div style={{width:18,height:62,background:"#173d5d",margin:"0 auto"}}/><div style={{height:12,width:w*.42,background:"#245579",borderRadius:20,margin:"0 auto"}}/></div>};
 
-export const CyberAlertVideo = ({script,audioDataUri}) => {
-  let start = 0;
-  return <AbsoluteFill style={{background:palette.navy}}>
-    <BackgroundEffects />
-    {audioDataUri ? <Audio src={audioDataUri} /> : null}
-    {(script.scenes || []).map((scene,index) => {
-      const duration = Math.max(75, Math.round((scene.duration || 5) * 30));
-      const item = <Sequence key={scene.id || index} from={start} durationInFrames={duration}><Scene scene={scene} index={index} /></Sequence>;
-      start += duration;
-      return item;
-    })}
-  </AbsoluteFill>;
-};
+const Emirati=({x,y,scale=1,female=false,delay=0})=>{const f=useCurrentFrame();return <div style={{position:"absolute",left:x,top:y,width:190,height:390,transform:`translateY(${Math.sin((f+delay)/18)*5}px) scale(${scale})`,transformOrigin:"bottom center"}}><div style={{position:"absolute",left:57,top:12,width:78,height:88,borderRadius:"46%",background:"#b9825d",boxShadow:"inset 0 -10px 0 #9b6548"}}/>{female?<><div style={{position:"absolute",left:38,top:0,width:118,height:132,borderRadius:55,border:"22px solid #101a2b",borderBottomWidth:35}}/><div style={{position:"absolute",left:18,top:100,width:155,height:270,background:"linear-gradient(160deg,#151d2a,#060a10)",borderRadius:"65px 65px 20px 20px",clipPath:"polygon(25% 0,75% 0,100% 100%,0 100%)"}}/></>:<><div style={{position:"absolute",left:34,top:-4,width:125,height:62,background:"#fff",borderRadius:"55px 55px 16px 16px",boxShadow:"0 8px 0 #e4e9ef"}}/><div style={{position:"absolute",left:92,top:0,width:5,height:100,background:"#111"}}/><div style={{position:"absolute",left:24,top:94,width:145,height:282,background:"linear-gradient(150deg,#fff,#dfe8f0)",borderRadius:"38px 38px 18px 18px",clipPath:"polygon(20% 0,80% 0,100% 100%,0 100%)"}}/></>}<div style={{position:"absolute",left:30,top:174,width:55,height:18,borderRadius:20,background:"#b9825d",transform:`rotate(${-15+Math.sin((f+delay)/16)*5}deg)`,transformOrigin:"right"}}/></div>};
+
+const Rack=({x,y,delay=0})=>{const f=useCurrentFrame();return <div style={{position:"absolute",left:x,top:y,width:210,height:410,border:"5px solid #204e70",borderRadius:20,background:"linear-gradient(90deg,#06101b,#0b2033,#06101b)",padding:22,boxShadow:"0 24px 60px #0009"}}>{[0,1,2,3,4].map(i=><div key={i} style={{height:55,marginBottom:14,borderRadius:9,background:"#102d45",border:"1px solid #286188",display:"flex",alignItems:"center",padding:13,gap:10}}><span style={{width:10,height:10,borderRadius:"50%",background:(f+delay+i*12)%55<38?P.cyan:P.blue,boxShadow:`0 0 12px ${P.cyan}`}}/><span style={{height:5,flex:1,background:"#27506d",borderRadius:5}}/></div>)}</div>};
+
+const Shield=({x,y,alert=false})=>{const f=useCurrentFrame();return <div style={{position:"absolute",left:x,top:y,width:230,height:280,clipPath:"polygon(50% 0,92% 18%,84% 72%,50% 100%,16% 72%,8% 18%)",background:`linear-gradient(145deg,${alert?P.risk:P.cyan},${P.blue})`,padding:8,transform:`scale(${1+Math.sin(f/10)*.035})`,filter:`drop-shadow(0 0 35px ${alert?P.risk:P.cyan}99)`}}><div style={{width:"100%",height:"100%",clipPath:"inherit",background:P.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:90,fontWeight:900,color:alert?P.risk:P.cyan}}>{alert?"!":"✓"}</div></div>};
+
+const Visuals=({scene,index})=>{const f=useCurrentFrame(),{fps}=useVideoConfig();const enter=spring({frame:f,fps,config:{damping:18,stiffness:85}}),risk=["risk","headline"].includes(scene.type);return <div style={{position:"absolute",left:45,right:45,top:330,height:670,opacity:enter,transform:`translateY(${(1-enter)*60}px)`}}><div style={{position:"absolute",inset:0,border:"1px solid #2b638044",borderRadius:46,background:"linear-gradient(145deg,#071625dd,#030b14aa)",boxShadow:"inset 0 0 80px #0a84ff18"}}/>{index%3===0&&<><Emirati x={78} y={250}/><Monitor x={360} y={205} w={410} alert={risk}/><Rack x={790} y={220} delay={18}/></>}{index%3===1&&<><Rack x={75} y={190}/><Emirati x={325} y={260} female delay={12}/><Emirati x={500} y={260} delay={25}/><Monitor x={690} y={215} w={310} alert={risk}/></>}{index%3===2&&<><Monitor x={60} y={235}/><Shield x={430} y={225} alert={risk}/><Emirati x={735} y={260}/><div style={{position:"absolute",left:250,top:520,width:530,height:5,background:`linear-gradient(90deg,transparent,${risk?P.risk:P.cyan},transparent)`,transform:`translateX(${Math.sin(f/20)*35}px)`,boxShadow:`0 0 18px ${risk?P.risk:P.cyan}`}}/></>}</div>};
+
+const Subtitle=({text,duration})=>{const f=useCurrentFrame(),words=String(text||"").trim().split(/\s+/).filter(Boolean),chunks=[];for(let i=0;i<words.length;i+=7)chunks.push(words.slice(i,i+7).join(" "));const at=Math.min(chunks.length-1,Math.floor(f/Math.max(1,duration)*Math.max(1,chunks.length)));return <div style={{position:"absolute",right:42,left:42,bottom:112,height:78,display:"flex",alignItems:"center",justifyContent:"center",direction:"rtl",whiteSpace:"nowrap",overflow:"hidden",color:P.white,fontSize:31,fontWeight:800,textAlign:"center",background:"#02070def",borderTop:`3px solid ${P.cyan}`,borderRadius:14,padding:"0 24px",textShadow:"0 3px 10px #000"}}>{chunks[at]||""}</div>};
+
+const Scene=({scene,index,total,duration})=>{const f=useCurrentFrame(),{fps}=useVideoConfig(),enter=spring({frame:f,fps,config:{damping:16,stiffness:110}}),label=scene.type==="action"?"الإجراء المطلوب":scene.type==="intro"?"نبض سيبراني":"تنبيه سيبراني";return <AbsoluteFill style={{direction:"rtl",fontFamily:"Cairo,Arial,sans-serif",color:P.white}}><div style={{position:"absolute",top:58,right:62,fontSize:28,fontWeight:900}}>نبض سيبراني <span style={{color:P.cyan}}>| CYBER PULSE</span></div><div style={{position:"absolute",top:126,right:62,left:62,zIndex:3,opacity:enter}}><div style={{color:P.cyan,fontSize:26,fontWeight:800,marginBottom:12}}>{label}</div><div style={{fontSize:54,fontWeight:900,lineHeight:1.25,textShadow:"0 7px 28px #000"}}>{scene.onScreenText}</div></div><Visuals scene={scene} index={index}/><Subtitle text={scene.voiceText} duration={duration}/><div style={{position:"absolute",bottom:65,right:62,left:62,height:7,background:"#ffffff22",borderRadius:10}}><div style={{height:"100%",width:`${((index+1)/Math.max(1,total))*100}%`,background:P.cyan,borderRadius:10}}/></div></AbsoluteFill>};
+
+export const CyberAlertVideo=({script,audioDataUri})=>{let start=0;const scenes=script.scenes||[];return <AbsoluteFill style={{background:P.navy}}><Background/>{audioDataUri?<Audio src={audioDataUri}/>:null}{scenes.map((scene,index)=>{const duration=Math.max(75,Math.round((scene.duration||5)*30));const item=<Sequence key={scene.id||index} from={start} durationInFrames={duration}><Scene scene={scene} index={index} total={scenes.length} duration={duration}/></Sequence>;start+=duration;return item;})}</AbsoluteFill>};
