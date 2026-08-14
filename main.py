@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.24.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.25.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -80,6 +80,7 @@ class VisualAlertRequest(BaseModel):
     title: str = Field(min_length=3, max_length=500)
     content: str = Field(min_length=10, max_length=12000)
     required_action: str = Field(min_length=3, max_length=4000)
+    visual_style: Literal["Auto", "Cinematic AI", "SOC Operations", "Executive GRC", "Cyber Awareness"] = "Cinematic AI"
 
 class ArchivePost(BaseModel):
     id: str | None = None
@@ -201,7 +202,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.24.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.25.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -209,7 +210,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"animated-emirati-v2", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"cinematic-ai-v3", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -231,7 +232,10 @@ ALERT CONTENT:
 {req.content}
 
 REQUIRED ACTION:
-{req.required_action}'''
+{req.required_action}
+
+SELECTED VISUAL STYLE:
+{req.visual_style}'''
     raw = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text
     data = extract_json(raw)
     scenes = data.get("scenes") if isinstance(data, dict) else None
@@ -248,6 +252,45 @@ REQUIRED ACTION:
         })
     if not clean: raise ValueError("تعذر تكوين مشاهد الفيديو")
     return {"videoTitle":str(data.get("videoTitle", req.title))[:300], "scenes":clean}
+
+def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
+    styles = {
+        "Cinematic AI":"premium cinematic realism, dramatic controlled lighting, shallow depth of field, slow dolly camera, polished film color grade",
+        "SOC Operations":"realistic UAE security operations center, large monitoring screens, focused incident response team, cool blue practical lighting",
+        "Executive GRC":"premium UAE government executive environment, risk and governance meeting, elegant architecture, restrained corporate lighting",
+        "Cyber Awareness":"human-centered UAE workplace cybersecurity awareness scene, clear everyday action, warm professional lighting",
+    }
+    selected = req.visual_style
+    if selected == "Auto":
+        selected = "Executive GRC" if scene.get("type") == "action" else "SOC Operations" if scene.get("type") in {"risk","content"} else "Cinematic AI"
+    return f'''Create a vertical 9:16 cinematic B-roll shot for an Arabic cybersecurity alert.
+Visual style: {styles.get(selected, styles["Cinematic AI"])}.
+Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
+Show culturally accurate adult Emirati professionals where people are relevant: men in clean white kandura and ghutra, women in professional abaya and shayla. Include realistic computers, laptops, cybersecurity screens, server rooms, or executive environments only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
+
+def _generate_veo_clip(prompt: str, output_path: Path):
+    api_key = os.environ["GEMINI_API_KEY"]
+    base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model = os.getenv("GEMINI_VIDEO_MODEL", "veo-3.1-fast-generate-preview")
+    extra = {"aspect_ratio":"9:16", "resolution":"720p", "duration_seconds":6, "style":"cinematic", "person_generation":"allow_adult", "negative_prompt":"text, logos, captions, watermark, distorted anatomy, extra fingers, hooded hacker, shaky camera"}
+    headers = {"Authorization":f"Bearer {api_key}"}
+    with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0), follow_redirects=True) as client:
+        created = client.post(f"{base}/videos", headers=headers, data={"model":model, "prompt":prompt, "extra_body":json.dumps(extra)})
+        created.raise_for_status(); operation = created.json()
+        video_id = operation.get("id") or operation.get("name")
+        if not video_id: raise ValueError("لم يُرجع Gemini معرّف عملية فيديو")
+        deadline = time.time() + 720
+        while time.time() < deadline:
+            status = client.get(f"{base}/videos/{video_id}", headers=headers)
+            status.raise_for_status(); data = status.json(); state = str(data.get("status", "")).lower()
+            if state == "failed": raise ValueError("فشل توليد لقطة Veo: " + str(data.get("error") or "سبب غير معروف")[:700])
+            if state == "completed":
+                url = data.get("url") or (data.get("video") or {}).get("url")
+                if not url: raise ValueError("اكتمل Veo دون رابط فيديو")
+                video = client.get(url, headers={**headers, "x-goog-api-key":api_key})
+                video.raise_for_status(); output_path.write_bytes(video.content); return
+            time.sleep(10)
+    raise ValueError("انتهت مهلة انتظار توليد فيديو Veo")
 
 def _extract_gemini_audio(payload: Any) -> tuple[bytes, str, int, int] | None:
     """Find audio in both the current Interactions REST schema and legacy responses."""
@@ -364,9 +407,15 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         audio_path = work_dir / "voiceover.wav"
         duration = _write_wav(audio_path, audio, mime_type, sample_rate, channels)
         _fit_scene_durations(script, duration)
-        _visual_job_update(job_id, status="rendering", progress=65, message="جاري مزامنة الصوت وتجهيز الفيديو...", script=script)
+        clip_paths = []
+        selected = [script["scenes"][i] for i in sorted(set([0, len(script["scenes"])//2, len(script["scenes"])-1]))]
+        for i, scene in enumerate(selected):
+            _visual_job_update(job_id, status="generating_visuals", progress=48+i*7, message=f"جاري إنشاء اللقطة السينمائية {i+1} من {len(selected)}...", script=script)
+            clip_path = work_dir / f"ai-scene-{i+1}.mp4"
+            _generate_veo_clip(_veo_prompt(scene, req), clip_path); clip_paths.append(str(clip_path))
+        _visual_job_update(job_id, status="rendering", progress=75, message="جاري تركيب اللقطات والصوت والترجمة...", script=script)
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path)}, ensure_ascii=False), encoding="utf-8")
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "clipPaths":clip_paths}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
         _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
