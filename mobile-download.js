@@ -249,10 +249,10 @@
     let s = document.createElement("section");
     s.id = "news";
     s.className = "card hidden";
-    s.innerHTML = `<div class="section-title"><div><h2 style="margin:0">الأخبار السيبرانية</h2><p style="color:#9eb2c9">أدخل الخبر؛ Nano Banana 2 ينشئ ثلاثة تصاميم مختلفة، ثم تختار الصورة المناسبة لإنشاء الخبر.</p></div><span class="counter">NEWS v10</span></div><label>عنوان الخبر</label><input id="newsTitle" placeholder="عنوان الخبر"><label>الخبر الكامل</label><textarea id="newsText" rows="13" placeholder="ألصق التاريخ، النوع، التفاصيل والإجراءات والمصدر إن وجدت"></textarea><div class="row"><button id="newsSuggest" class="action">تحليل الخبر وتوليد 3 تصاميم</button><button id="newsRegen" class="action secondary hidden">توليد 3 تصاميم جديدة</button><button id="newsCreate" class="action secondary hidden">إنشاء الخبر بالصورة المختارة</button><button id="newsSave" class="action secondary hidden">حفظ JPEG</button><button id="newsShare" class="action secondary hidden">مشاركة + Caption</button></div><div id="newsMsg" class="status"></div><div id="newsMeta"></div><div id="newsReview"></div><div id="newsResult"></div>`;
+    s.innerHTML = `<div class="section-title"><div><h2 style="margin:0">الأخبار السيبرانية</h2><p style="color:#9eb2c9">ألصق الخبر أو ارفع ملف تنبيه؛ Nano Banana 2 ينشئ ثلاثة تصاميم مختلفة، ثم تختار الصورة المناسبة.</p></div><span class="counter">NEWS v11</span></div><div class="news-upload"><label for="newsFile">رفع ملف التنبيه — لا يتم حفظ الملف</label><input id="newsFile" type="file" accept=".pdf,.docx,.txt,.md,.csv,.json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"><small>PDF، DOCX، TXT، MD، CSV أو JSON — بحد أقصى 8 MB. تتم معالجة الملف مؤقتًا في الذاكرة فقط.</small></div><label>عنوان الخبر</label><input id="newsTitle" placeholder="عنوان الخبر"><label>الخبر الكامل</label><textarea id="newsText" rows="13" placeholder="ألصق التاريخ، النوع، التفاصيل والإجراءات والمصدر إن وجدت"></textarea><div class="row"><button id="newsSuggest" class="action">تحليل الخبر وتوليد 3 تصاميم</button><button id="newsRegen" class="action secondary hidden">توليد 3 تصاميم جديدة</button><button id="newsCreate" class="action secondary hidden">إنشاء الخبر بالصورة المختارة</button><button id="newsSave" class="action secondary hidden">حفظ JPEG</button><button id="newsShare" class="action secondary hidden">مشاركة + Caption</button></div><div id="newsMsg" class="status"></div><div id="newsMeta"></div><div id="newsReview"></div><div id="newsResult"></div>`;
     document.querySelector(".wrap").appendChild(s);
     let st = document.createElement("style");
-    st.textContent = `.news-stage{max-width:760px;margin:20px auto;aspect-ratio:4/5;position:relative;overflow:hidden;background:#050B12;border:1px solid #0A84FF55;border-radius:18px}.news-stage>.hero{width:100%;height:100%;object-fit:cover}.news-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:18px 0}.news-option{background:#071421;border:2px solid #24415e;border-radius:16px;overflow:hidden;padding:0;color:#fff;text-align:right;transition:.18s}.news-option.selected{border-color:#00D1C7;box-shadow:0 0 0 3px #00D1C733}.news-option img{display:block;width:100%;aspect-ratio:4/5;object-fit:cover}.news-option-info{padding:11px;direction:rtl}.news-option-info b{display:block;margin-bottom:5px}.news-option-info small{display:block;color:#9eb2c9;line-height:1.55;min-height:42px}.news-option button{width:100%;margin-top:9px;border:0;border-radius:8px;padding:9px;background:#173149;color:#def;cursor:pointer;font-weight:700}.news-option.selected button{background:#00D1C7;color:#021011}.news-overlay{position:absolute;inset:0;background:linear-gradient(180deg,rgba(5,11,18,.96) 0%,rgba(5,11,18,.82) 29%,rgba(5,11,18,.18) 54%,rgba(5,11,18,.18) 82%,rgba(5,11,18,.78) 100%)}.news-logo{position:absolute;z-index:4;right:4%;top:2.5%;width:29%;border-radius:7px}.news-content{position:absolute;z-index:2;right:5%;left:5%;top:14%;height:80%;direction:rtl;text-align:right;color:#fff;font-family:Cairo;display:flex;flex-direction:column;gap:12px}.news-head{max-width:92%;font-size:clamp(24px,3.2vw,44px);font-weight:900;line-height:1.35;text-shadow:0 3px 18px #000}.news-badges{display:flex;direction:rtl;gap:7px;flex-wrap:wrap}.news-badge{background:#071522cc;border:1px solid #00D1C7;color:#00D1C7;padding:5px 10px;border-radius:8px;font-size:12px}.sev-high{background:#6d1010d9;border-color:#ff4d4f;color:#fff}.news-source{margin-top:auto;color:#d7e5ef;font-size:clamp(10px,1vw,14px);text-shadow:0 2px 10px #000}.news-meta-box,.news-review{margin-top:12px;padding:12px;border:1px solid #24415e;border-radius:10px;color:#b9c9d9;direction:rtl}@media(max-width:900px){.news-options{grid-template-columns:1fr}}`;
+    st.textContent = `.news-upload{margin:15px 0;padding:14px;border:1px dashed #1bd3cf;border-radius:12px;background:#081827}.news-upload label{margin-top:0;color:#77f2ee;font-weight:700}.news-upload small{display:block;margin-top:7px;color:#9eb2c9}.news-stage{max-width:760px;margin:20px auto;aspect-ratio:4/5;position:relative;overflow:hidden;background:#050B12;border:1px solid #0A84FF55;border-radius:18px}.news-stage>.hero{width:100%;height:100%;object-fit:cover}.news-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:18px 0}.news-option{background:#071421;border:2px solid #24415e;border-radius:16px;overflow:hidden;padding:0;color:#fff;text-align:right;transition:.18s}.news-option.selected{border-color:#00D1C7;box-shadow:0 0 0 3px #00D1C733}.news-option img{display:block;width:100%;aspect-ratio:4/5;object-fit:cover}.news-option-info{padding:11px;direction:rtl}.news-option-info b{display:block;margin-bottom:5px}.news-option-info small{display:block;color:#9eb2c9;line-height:1.55;min-height:42px}.news-option button{width:100%;margin-top:9px;border:0;border-radius:8px;padding:9px;background:#173149;color:#def;cursor:pointer;font-weight:700}.news-option.selected button{background:#00D1C7;color:#021011}.news-overlay{position:absolute;inset:0;background:linear-gradient(180deg,rgba(5,11,18,.96) 0%,rgba(5,11,18,.82) 29%,rgba(5,11,18,.18) 54%,rgba(5,11,18,.18) 82%,rgba(5,11,18,.78) 100%)}.news-logo{position:absolute;z-index:4;right:4%;top:2.5%;width:29%;border-radius:7px}.news-content{position:absolute;z-index:2;right:5%;left:5%;top:14%;height:80%;direction:rtl;text-align:right;color:#fff;font-family:Cairo;display:flex;flex-direction:column;gap:12px}.news-head{max-width:92%;font-size:clamp(24px,3.2vw,44px);font-weight:900;line-height:1.35;text-shadow:0 3px 18px #000}.news-badges{display:flex;direction:rtl;gap:7px;flex-wrap:wrap}.news-badge{background:#071522cc;border:1px solid #00D1C7;color:#00D1C7;padding:5px 10px;border-radius:8px;font-size:12px}.sev-high{background:#6d1010d9;border-color:#ff4d4f;color:#fff}.news-source{margin-top:auto;color:#d7e5ef;font-size:clamp(10px,1vw,14px);text-shadow:0 2px 10px #000}.news-meta-box,.news-review{margin-top:12px;padding:12px;border:1px solid #24415e;border-radius:10px;color:#b9c9d9;direction:rtl}@media(max-width:900px){.news-options{grid-template-columns:1fr}}`;
     document.head.appendChild(st);
     t.onclick = () => {
       q("studio")?.classList.add("hidden");
@@ -268,10 +268,41 @@
         b.addEventListener("click", () => s.classList.add("hidden")),
       );
     q("newsSuggest").onclick = analyse;
+    q("newsFile").onchange = uploadNewsFile;
     q("newsRegen").onclick = generateArt;
     q("newsCreate").onclick = create;
     q("newsSave").onclick = save;
     q("newsShare").onclick = share;
+  }
+  async function uploadNewsFile(event) {
+    const input = event.currentTarget,
+      file = input.files?.[0];
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) {
+      input.value = "";
+      return (q("newsMsg").textContent = "حجم الملف يتجاوز 8 ميجابايت.");
+    }
+    q("newsMsg").textContent = "جاري استخراج التنبيه من الملف دون حفظه...";
+    try {
+      const r = await fetch("/api/extract-news-file", {
+          method: "POST",
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+            "X-News-Filename": encodeURIComponent(file.name),
+          },
+          body: file,
+        }),
+        d = await responseData(r);
+      if (!r.ok) throw Error(d.detail || "فشل استخراج الملف");
+      q("newsText").value = d.text || "";
+      if (!q("newsTitle").value.trim()) q("newsTitle").value = d.title || "";
+      q("newsMsg").textContent = `تم استخراج ${d.filename}. لم يتم حفظ الملف. يبدأ التحليل الآن...`;
+      await analyse();
+    } catch (e) {
+      q("newsMsg").textContent = "خطأ: " + e.message;
+    } finally {
+      input.value = "";
+    }
   }
   async function analyse() {
     const title = q("newsTitle").value.trim(),
