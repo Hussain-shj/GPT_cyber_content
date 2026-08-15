@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.38.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.39.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -207,7 +207,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.38.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.39.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -215,7 +215,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"uae-campaign-visual-language-v16", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"reference-audio-no-text-box-v17", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -429,7 +429,7 @@ def _limit_voice_duration(path: Path, duration: float, maximum: float = 56.5) ->
     with wave.open(str(path), "rb") as wf: return wf.getnframes() / float(wf.getframerate())
 
 def _write_corporate_music(path: Path, duration: float):
-    """Create a restrained instrumental corporate bed: warm pad, piano-like pulse and soft lift."""
+    """Create a stereo cinematic corporate ambient bed with pad, pulse and digital shimmer."""
     rate = 24000
     seconds = min(60.0, max(18.0, duration + 1.5))
     total = int(rate * seconds)
@@ -443,11 +443,22 @@ def _write_corporate_music(path: Path, duration: float):
         pulse = math.sin(2 * math.pi * pulse_note * t) * pluck
         shimmer = math.sin(2 * math.pi * chord[2] * 2 * t) * (.15 + .1 * math.sin(2 * math.pi * .12 * t))
         intro = min(1.0, t / 1.2); outro = min(1.0, max(0.0, seconds - t) / 1.4)
-        sample = (pad * .34 + pulse * .22 + shimmer * .10) * intro * outro
-        value = max(-32767, min(32767, int(sample * 11500)))
-        frames.extend(value.to_bytes(2, "little", signed=True))
+        bed = (pad * .38 + pulse * .20) * intro * outro
+        left = bed + shimmer * .12 * intro * outro
+        right_shimmer = math.sin(2 * math.pi * chord[2] * 2 * t + .42) * (.15 + .1 * math.sin(2 * math.pi * .12 * t))
+        right = bed * .97 + right_shimmer * .12 * intro * outro
+        for sample in (left, right):
+            value = max(-32767, min(32767, int(sample * 12500)))
+            frames.extend(value.to_bytes(2, "little", signed=True))
     with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(rate); wf.writeframes(frames)
+        wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(rate); wf.writeframes(frames)
+
+def _normalize_final_video_audio(path: Path):
+    """Match the supplied reference videos: about -14 LUFS integrated and -1 dBTP."""
+    normalized = path.with_name("visual-alert-normalized.mp4")
+    result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-c:v", "copy", "-af", "loudnorm=I=-14:TP=-1:LRA=6", "-c:a", "aac", "-b:a", "192k", str(normalized)], capture_output=True, text=True, timeout=240)
+    if result.returncode != 0 or not normalized.exists(): raise ValueError("تعذر ضبط مستوى الصوت النهائي إلى -14 LUFS")
+    shutil.move(str(normalized), str(path))
 
 def _fit_scene_durations(script: dict[str, Any], audio_duration: float):
     if audio_duration > 57: raise ValueError("تعذر ضبط التعليق الصوتي ضمن الحد الأقصى 58 ثانية")
@@ -526,6 +537,8 @@ def _render_approved_visual_alert(job_id: str):
         props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
+        _visual_job_update(job_id, status="rendering", progress=96, message="جاري ضبط الموسيقى والصوت إلى المستوى المرجعي...")
+        _normalize_final_video_audio(output_path)
         _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
     except Exception as exc:
         _visual_job_update(job_id, status="failed", message=str(exc)[:1400], detail=str(exc)[:1400], completed_at=datetime.now(timezone.utc).isoformat())
