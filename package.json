@@ -2,13 +2,16 @@
   "name": "cyberpulse-visual-alert",
   "private": true,
   "type": "module",
-  "engines": {"node": "22.x"},
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "check": "node --check remotion/render.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.509",
     "@remotion/cli": "4.0.509",
+    "@remotion/google-fonts": "4.0.509",
     "@remotion/media": "4.0.509",
     "@remotion/renderer": "4.0.509",
     "react": "19.2.8",
