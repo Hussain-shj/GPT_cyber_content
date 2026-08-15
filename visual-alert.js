@@ -31,6 +31,10 @@
         <span class="counter">Cinematic AI</span>
       </div>
       <div class="va-form">
+        <label>الفكرة الأولية</label>
+        <textarea id="vaIdea" rows="4" maxlength="6000" placeholder="اكتب الفكرة باختصار، مثال: مخاطر رفع ملفات العمل إلى أدوات الذكاء الاصطناعي"></textarea>
+        <button id="vaAnalyzeIdea" class="action secondary va-analyze">✨ تحليل الفكرة وتعبئة الحقول</button>
+        <div id="vaIdeaStatus" class="status"></div>
         <label>عنوان التنبيه</label>
         <input id="vaTitle" maxlength="500" placeholder="مثال: ثغرة أمنية حرجة في Microsoft SharePoint">
         <label>محتوى التنبيه</label>
@@ -51,7 +55,7 @@
     const style = document.createElement("style");
     style.textContent = `
       .va-section{max-width:1050px;margin:0 auto}.va-title h2{margin:0}.va-title p{margin:5px 0;color:#9eb2c9}
-      .va-form{max-width:820px;margin:18px auto}.va-form textarea{line-height:1.8}.va-generate{display:block;min-width:220px;margin:18px auto 0}
+      .va-form{max-width:820px;margin:18px auto}.va-form textarea{line-height:1.8}.va-analyze{display:block;margin:10px 0 4px}.va-generate{display:block;min-width:220px;margin:18px auto 0}
       .va-progress-wrap{max-width:820px;margin:18px auto}.va-progress{height:12px;background:#06101d;border:1px solid #294760;border-radius:20px;overflow:hidden}
       .va-progress span{display:block;width:0;height:100%;background:linear-gradient(90deg,#0a84ff,#1bd3cf);transition:width .45s ease}.va-steps{text-align:center;color:#77f2ee;margin-top:9px}
       .va-result{max-width:820px;margin:20px auto}.va-player{display:block;width:min(100%,390px);aspect-ratio:9/16;margin:0 auto;background:#02070c;border:1px solid #1bd3cf55;border-radius:18px}
@@ -65,6 +69,7 @@
     tab.onclick = () => showSection(tab, section);
     document.querySelectorAll('.tab:not([data-view="visual-alert-editor"])').forEach((button) => button.addEventListener("click", () => section.classList.add("hidden")));
     byId("vaGenerate").onclick = generate;
+    byId("vaAnalyzeIdea").onclick = analyzeIdea;
     if (location.hash === "#visual-alert-editor") tab.click();
   }
 
@@ -80,6 +85,24 @@
     if (!byId("vaContent").value.trim()) return "يرجى إدخال محتوى التنبيه.";
     if (!byId("vaAction").value.trim()) return "يرجى إدخال الإجراء المطلوب.";
     return "";
+  }
+
+  async function analyzeIdea() {
+    const idea = byId("vaIdea").value.trim();
+    if (!idea) return byId("vaIdeaStatus").textContent = "اكتب الفكرة أولًا.";
+    const button = byId("vaAnalyzeIdea"); button.disabled = true;
+    byId("vaIdeaStatus").textContent = "جاري تحليل الفكرة وصياغة الحقول...";
+    try {
+      const response = await fetch("/api/visual-alert/analyze-idea", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({idea})});
+      const data = await responseData(response);
+      if (!response.ok) throw new Error(data.detail || "تعذر تحليل الفكرة");
+      byId("vaTitle").value = data.title || "";
+      byId("vaContent").value = data.content || "";
+      byId("vaAction").value = data.required_action || "";
+      if ([...byId("vaVisualStyle").options].some((option) => option.value === data.visual_style)) byId("vaVisualStyle").value = data.visual_style;
+      byId("vaIdeaStatus").textContent = "تمت تعبئة الحقول. راجعها وعدّلها، ثم اضغط «إنشاء مواد المعاينة» عند الموافقة.";
+    } catch (err) { byId("vaIdeaStatus").textContent = `خطأ: ${err.message}`; }
+    finally { button.disabled = false; }
   }
 
   async function generate() {
