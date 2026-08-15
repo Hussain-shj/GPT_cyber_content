@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.37.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.38.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -207,7 +207,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.37.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.38.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -215,7 +215,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"sortable-assets-images-only-v15", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"uae-campaign-visual-language-v16", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -286,6 +286,7 @@ Visual style: {styles.get(selected, styles["Cinematic AI"])}.
 Required setting: {scene.get("visualSetting") or "a real-world location directly relevant to the scene"}.
 Visual mode: {scene.get("visualMode") or "environment"}.
 Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
+Campaign visual language: premium UAE public-awareness film, human-centered documentary realism, natural expressions and everyday actions, refined dark navy-to-teal cinematic color grade, soft practical lighting, shallow depth of field, polished but believable government communication style. Compose the subject in the middle and lower portions while preserving clean, low-detail negative space around the lower-middle text zone. Do not generate any text inside the visual asset; typography is added later by the video renderer.
 Choose the environment from the required setting and factual content, not from generic cybersecurity imagery. Possible environments include private offices, open workplaces, meeting rooms, government service areas, reception spaces, home or family settings, remote-work desks, cafés, travel environments, data centers, technical rooms, and SOC facilities. Do not use a SOC, server room, large monitoring wall, or multiple cyber screens unless this exact scene requires it. Do not repeat the setting, camera angle, people arrangement, or main device used in another asset from this video.
 If visual mode is screen_capture, create a convincing full-frame or close-up screen-capture-style interface that directly depicts the supported event, such as a phishing email layout, suspicious hyperlink focus, fake login form, unusual login warning, malicious attachment state, malware alert, compromised session, or security update. Make the mechanism understandable through layout, icons, warning colors, cursor position, highlights and interface state. Do not invent personal data, credentials, sender names, domains, brands, CVEs, versions, or unsupported incident details. Any interface copy must be abstract, blurred or non-readable; the separate video overlay supplies the real text.
 Show culturally accurate Emirati people where relevant. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Family members and children may appear only for relevant personal or family cybersecurity awareness, in a natural, respectful UAE home context. Keep wardrobe culturally accurate and professional. Include realistic phones, tablets, laptops, office computers, home devices, security screens, or servers only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
