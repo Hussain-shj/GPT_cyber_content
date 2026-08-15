@@ -9,6 +9,6 @@ export const Root = () => <Composition
   height={1920}
   fps={30}
   durationInFrames={900}
-  defaultProps={{script:{videoTitle:"تنبيه سيبراني",estimatedDuration:30,scenes:[]},audioDataUri:"",musicDataUri:"",aiClipDataUris:[],aiImageDataUris:[]}}
+  defaultProps={{script:{videoTitle:"تنبيه سيبراني",estimatedDuration:30,scenes:[]},audioDataUri:"",musicDataUri:"",visualAssetsDataUris:[]}}
   calculateMetadata={({props}) => ({durationInFrames:Math.min(1770, Math.max(90, Math.ceil((props.script?.estimatedDuration || 30) * 30)))})}
 />;
