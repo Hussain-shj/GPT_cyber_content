@@ -39,6 +39,8 @@
         <textarea id="vaAction" rows="5" maxlength="4000" placeholder="أدخل الإجراءات المطلوب اتخاذها"></textarea>
         <label>النمط البصري</label>
         <select id="vaVisualStyle"><option value="Cinematic AI">Cinematic AI — سينمائي واقعي</option><option value="Auto">تلقائي حسب المحتوى</option><option value="SOC Operations">مركز عمليات SOC</option><option value="Executive GRC">مؤسسي وGRC</option><option value="Cyber Awareness">توعية سيبرانية</option></select>
+        <label>توزيع المواد البصرية</label>
+        <select id="vaVideoCount"><option value="1">فيديو واحد + 5 صور</option><option value="3">3 فيديوهات + 3 صور</option></select>
         <button id="vaGenerate" class="action va-generate">🎬 إنشاء مواد المعاينة</button>
         <div id="vaStatus" class="status"></div>
         <div id="vaProgressWrap" class="va-progress-wrap hidden"><div class="va-progress"><span id="vaProgressBar"></span></div><div id="vaSteps" class="va-steps"></div></div>
@@ -89,7 +91,7 @@
     byId("vaProgressWrap").classList.remove("hidden");
     updateProgress(3, "بدء المهمة...");
     try {
-      const response = await fetch("/api/visual-alert/render", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:byId("vaTitle").value.trim(), content:byId("vaContent").value.trim(), required_action:byId("vaAction").value.trim(), visual_style:byId("vaVisualStyle").value})});
+      const response = await fetch("/api/visual-alert/render", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:byId("vaTitle").value.trim(), content:byId("vaContent").value.trim(), required_action:byId("vaAction").value.trim(), visual_style:byId("vaVisualStyle").value, video_count:Number(byId("vaVideoCount").value)})});
       const job = await responseData(response);
       if (!response.ok) throw new Error(job.detail || "تعذر بدء إنشاء الفيديو");
       poll(job.id);
@@ -119,10 +121,10 @@
 
   function showReview(jobId, job) {
     byId("vaGenerate").disabled = false;
-    const video = job.clip_count ? `<div class="va-review-card"><h4>لقطة الفيديو</h4><video controls playsinline preload="metadata" src="/api/visual-alert/preview-video/${encodeURIComponent(jobId)}"></video></div>` : `<div class="va-review-card"><h4>لقطة الفيديو</h4><p>لم تتوفر بسبب حد Veo اليومي. يمكنك مراجعة الصور والصوت أو إعادة المحاولة لاحقًا.</p></div>`;
-    const images = [1,2,3].map((n) => `<div class="va-review-card"><h4>الصورة ${n}</h4><img src="/api/visual-alert/preview-image/${encodeURIComponent(jobId)}/${n}" alt="معاينة الصورة ${n}"></div>`).join("");
+    const videos = job.clip_count ? Array.from({length:job.clip_count}, (_,i) => i+1).map((n) => `<div class="va-review-card"><h4>الفيديو ${n}</h4><video controls playsinline preload="metadata" src="/api/visual-alert/preview-video/${encodeURIComponent(jobId)}/${n}"></video></div>`).join("") : `<div class="va-review-card"><h4>لقطات الفيديو</h4><p>لم تتوفر بسبب حد Veo اليومي. تم التعويض بصور إضافية.</p></div>`;
+    const images = Array.from({length:job.image_count || 0}, (_,i) => i+1).map((n) => `<div class="va-review-card"><h4>الصورة ${n}</h4><img src="/api/visual-alert/preview-image/${encodeURIComponent(jobId)}/${n}" alt="معاينة الصورة ${n}"></div>`).join("");
     const scenes = ((job.script || {}).scenes || []).map((scene) => `<div class="va-scene"><b>${esc(scene.onScreenText)}</b><p>${esc(scene.voiceText)}</p><p lang="en" dir="ltr">${esc(scene.subtitleEnglish)}</p></div>`).join("");
-    byId("vaResult").innerHTML = `<div class="va-review-note">راجع الفيديو والصور والتعليق الصوتي. لن يتم الدمج قبل موافقتك.</div><div class="va-review-grid">${video}${images}</div><div class="va-review-card"><h4>التعليق الصوتي العربي</h4><audio class="va-audio" controls preload="metadata" src="/api/visual-alert/preview-audio/${encodeURIComponent(jobId)}"></audio></div><div class="va-actions"><button id="vaApprove" class="action">✅ موافقة ودمج الفيديو</button><button id="vaReject" class="action secondary">إعادة إنشاء المواد</button></div>${scenes ? `<details class="va-script"><summary>مراجعة النص والترجمة</summary>${scenes}</details>` : ""}`;
+    byId("vaResult").innerHTML = `<div class="va-review-note">راجع ${job.clip_count || 0} فيديو و${job.image_count || 0} صور والتعليق الصوتي. لن يتم الدمج قبل موافقتك.</div><div class="va-review-grid">${videos}${images}</div><div class="va-review-card"><h4>التعليق الصوتي العربي</h4><audio class="va-audio" controls preload="metadata" src="/api/visual-alert/preview-audio/${encodeURIComponent(jobId)}"></audio></div><div class="va-actions"><button id="vaApprove" class="action">✅ موافقة ودمج الفيديو</button><button id="vaReject" class="action secondary">إعادة إنشاء المواد</button></div>${scenes ? `<details class="va-script"><summary>مراجعة النص والترجمة</summary>${scenes}</details>` : ""}`;
     byId("vaApprove").onclick = async () => {
       byId("vaApprove").disabled = true; byId("vaReject").disabled = true;
       try {
