@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.36.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.37.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -82,7 +82,10 @@ class VisualAlertRequest(BaseModel):
     content: str = Field(min_length=10, max_length=12000)
     required_action: str = Field(min_length=3, max_length=4000)
     visual_style: Literal["Auto", "Cinematic AI", "SOC Operations", "Executive GRC", "Cyber Awareness"] = "Cinematic AI"
-    video_count: Literal[1, 3] = 1
+    video_count: Literal[0, 1, 3] = 1
+
+class VisualApprovalRequest(BaseModel):
+    asset_order: list[str] = Field(default_factory=list, max_length=6)
 
 class ArchivePost(BaseModel):
     id: str | None = None
@@ -204,7 +207,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.36.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.37.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -212,7 +215,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"content-screen-captures-v14", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"sortable-assets-images-only-v15", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -499,7 +502,8 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
             image_b64, _ = generate_nano_banana_image(_cinematic_still_prompt(selected[i], req, i), "9:16")
             image_path = work_dir / f"ai-scene-{position}.jpg"
             image_path.write_bytes(base64.b64decode(image_b64)); image_paths.append(str(image_path))
-        _visual_job_update(job_id, status="ready_for_review", progress=78, message="المواد جاهزة للمراجعة. وافق عليها لبدء الدمج.", script=script, clip_count=len(clip_paths), image_count=len(image_paths), preview_ready=True)
+        asset_order = [f"video:{i+1}" for i in range(len(clip_paths))] + [f"image:{i+1}" for i in range(len(image_paths))]
+        _visual_job_update(job_id, status="ready_for_review", progress=78, message="المواد جاهزة للمراجعة والترتيب. وافق عليها لبدء الدمج.", script=script, clip_count=len(clip_paths), image_count=len(image_paths), asset_order=asset_order, preview_ready=True)
     except Exception as exc:
         _visual_job_update(job_id, status="failed", message=str(exc)[:1400], detail=str(exc)[:1400], completed_at=datetime.now(timezone.utc).isoformat())
 
@@ -508,14 +512,17 @@ def _render_approved_visual_alert(job_id: str):
         with VISUAL_ALERT_JOBS_LOCK:
             job = VISUAL_ALERT_JOBS.get(job_id)
             if not job: return
-            work_dir = Path(job["work_dir"]); script = job["script"]
+            work_dir = Path(job["work_dir"]); script = job["script"]; asset_order = job.get("asset_order", [])
         audio_path = work_dir / "voiceover.wav"
         music_path = work_dir / "inspirational-corporate.wav"
         clip_paths = [str(path) for path in sorted(work_dir.glob("veo-source-*.mp4"))]
         image_paths = [str(path) for path in sorted(work_dir.glob("ai-scene-*.jpg"))]
+        asset_lookup = {**{f"video:{i+1}":{"type":"video","path":path} for i,path in enumerate(clip_paths)}, **{f"image:{i+1}":{"type":"image","path":path} for i,path in enumerate(image_paths)}}
+        visual_assets = [asset_lookup[token] for token in asset_order if token in asset_lookup]
+        if len(visual_assets) != len(asset_lookup): raise ValueError("ترتيب المواد غير مكتمل")
         _visual_job_update(job_id, status="rendering", progress=84, message="تمت الموافقة؛ جاري دمج الفيديو والصور والصوت...")
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "clipPaths":clip_paths, "imagePaths":image_paths}, ensure_ascii=False), encoding="utf-8")
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
         _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
@@ -541,12 +548,15 @@ def visual_alert_status(job_id: str):
         return {k:v for k,v in job.items() if k not in {"work_dir", "created_ts"}}
 
 @app.post("/api/visual-alert/approve/{job_id}", status_code=202)
-def approve_visual_alert(job_id: str):
+def approve_visual_alert(job_id: str, approval: VisualApprovalRequest):
     with VISUAL_ALERT_JOBS_LOCK:
         job = VISUAL_ALERT_JOBS.get(job_id)
         if not job: raise HTTPException(404, "المهمة غير موجودة أو انتهت صلاحيتها")
         if job.get("status") != "ready_for_review": raise HTTPException(409, "المواد ليست جاهزة للموافقة")
-        job.update(status="approval_received", progress=80, message="تم استلام الموافقة")
+        expected = set(job.get("asset_order", []))
+        supplied = approval.asset_order
+        if len(supplied) != len(expected) or set(supplied) != expected: raise HTTPException(400, "ترتيب المواد غير صالح أو غير مكتمل")
+        job.update(status="approval_received", progress=80, message="تم استلام الموافقة", asset_order=supplied)
     threading.Thread(target=_render_approved_visual_alert, args=(job_id,), daemon=True).start()
     return {"id":job_id, "status":"approval_received", "progress":80}
 
