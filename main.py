@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.30.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.31.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -203,7 +203,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.30.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.31.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -211,7 +211,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"three-video-three-image-v8", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"english-subtitles-cairo-louder-music-v9", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -224,7 +224,7 @@ def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
     prompt = f'''You are a professional cybersecurity short-form video editor.
 Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
 Target 38-50 seconds and never exceed 55 seconds. The combined voiceText across ALL scenes must be no more than 100 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text. Each visual suggestion must feature a lively UAE government or enterprise environment where relevant: Emirati men in kandura and ghutra, Emirati women in professional abaya and shayla, computers, security-operation screens, servers, laptops, and cybersecurity activity. Keep people respectful, professional, realistic, and culturally accurate.
-Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, visualSuggestion. The required action must be communicated clearly near the end.
+Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, subtitleEnglish, visualSuggestion. subtitleEnglish must be a faithful, concise English translation of voiceText, suitable for a single subtitle line; preserve product names, CVEs, versions and technical meaning exactly. The required action must be communicated clearly near the end.
 
 ALERT TITLE:
 {req.title}
@@ -249,6 +249,7 @@ SELECTED VISUAL STYLE:
             "duration":max(3, min(15, int(scene.get("duration", 6)))),
             "onScreenText":" ".join(str(scene.get("onScreenText", "")).split()[:9]),
             "voiceText":str(scene.get("voiceText", "")).strip()[:700],
+            "subtitleEnglish":" ".join(str(scene.get("subtitleEnglish", "")).strip().split())[:500],
             "visualSuggestion":str(scene.get("visualSuggestion", "")).strip()[:500],
         })
     if not clean: raise ValueError("تعذر تكوين مشاهد الفيديو")
