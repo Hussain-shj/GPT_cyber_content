@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.39.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.40.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -86,6 +86,7 @@ class VisualAlertRequest(BaseModel):
 
 class VisualApprovalRequest(BaseModel):
     asset_order: list[str] = Field(default_factory=list, max_length=6)
+    motion_overlays: bool = False
 
 class ArchivePost(BaseModel):
     id: str | None = None
@@ -207,7 +208,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.39.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.40.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -215,7 +216,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"reference-audio-no-text-box-v17", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"optional-motion-overlays-v18", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -524,7 +525,7 @@ def _render_approved_visual_alert(job_id: str):
         with VISUAL_ALERT_JOBS_LOCK:
             job = VISUAL_ALERT_JOBS.get(job_id)
             if not job: return
-            work_dir = Path(job["work_dir"]); script = job["script"]; asset_order = job.get("asset_order", [])
+            work_dir = Path(job["work_dir"]); script = job["script"]; asset_order = job.get("asset_order", []); motion_overlays = bool(job.get("motion_overlays"))
         audio_path = work_dir / "voiceover.wav"
         music_path = work_dir / "inspirational-corporate.wav"
         clip_paths = [str(path) for path in sorted(work_dir.glob("veo-source-*.mp4"))]
@@ -534,7 +535,7 @@ def _render_approved_visual_alert(job_id: str):
         if len(visual_assets) != len(asset_lookup): raise ValueError("ترتيب المواد غير مكتمل")
         _visual_job_update(job_id, status="rendering", progress=84, message="تمت الموافقة؛ جاري دمج الفيديو والصور والصوت...")
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets}, ensure_ascii=False), encoding="utf-8")
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets, "motionOverlays":motion_overlays}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
         _visual_job_update(job_id, status="rendering", progress=96, message="جاري ضبط الموسيقى والصوت إلى المستوى المرجعي...")
@@ -570,7 +571,7 @@ def approve_visual_alert(job_id: str, approval: VisualApprovalRequest):
         expected = set(job.get("asset_order", []))
         supplied = approval.asset_order
         if len(supplied) != len(expected) or set(supplied) != expected: raise HTTPException(400, "ترتيب المواد غير صالح أو غير مكتمل")
-        job.update(status="approval_received", progress=80, message="تم استلام الموافقة", asset_order=supplied)
+        job.update(status="approval_received", progress=80, message="تم استلام الموافقة", asset_order=supplied, motion_overlays=approval.motion_overlays)
     threading.Thread(target=_render_approved_visual_alert, args=(job_id,), daemon=True).start()
     return {"id":job_id, "status":"approval_received", "progress":80}
 
