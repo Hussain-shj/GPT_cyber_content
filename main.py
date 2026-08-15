@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.35.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.36.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -204,7 +204,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.35.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.36.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -212,7 +212,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"content-led-diverse-scenes-v13", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"content-screen-captures-v14", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -225,8 +225,10 @@ def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
     prompt = f'''You are a professional cybersecurity short-form video editor.
 Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
 Target 38-50 seconds and never exceed 55 seconds. The combined voiceText across ALL scenes must be no more than 100 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text.
-Build a visually diverse sequence driven by the meaning of each scene. Do NOT default every scene to a SOC, control room, server room, or wall of screens. Choose a different appropriate real-world setting for each scene from possibilities such as a private employee office, open-plan workplace, executive office, meeting room, government service counter, reception, remote-work desk, home living room, family using phones or a laptop, café, airport or travel setting, data center, technical workshop, or SOC. Use a SOC or server room only when the supplied alert specifically supports it. A family or home scene is allowed only when the content concerns personal cyber safety, children, parents, home devices, scams, passwords, social media, or public awareness. Every visualSuggestion must name one concrete setting, subjects, exact action, and relevant device; settings and compositions must not repeat across scenes. Keep people respectful, professional, realistic, culturally accurate, and relevant to the supplied alert.
-Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, subtitleEnglish, visualSetting, visualSuggestion. subtitleEnglish must be a faithful, concise English translation of voiceText, suitable for a single subtitle line; preserve product names, CVEs, versions and technical meaning exactly. The required action must be communicated clearly near the end.
+Build a visually diverse sequence driven by the meaning of each scene. Do NOT default every scene to a SOC, control room, server room, or wall of screens. Choose a different appropriate real-world setting for each scene from possibilities such as a private employee office, open-plan workplace, executive office, meeting room, government service counter, reception, remote-work desk, home living room, family using phones or a laptop, café, airport or travel setting, data center, technical workshop, or SOC. Use a SOC or server room only when the supplied alert specifically supports it. A family or home scene is allowed only when the content concerns personal cyber safety, children, parents, home devices, scams, passwords, social media, or public awareness.
+A scene may instead be a realistic screen-capture-style visual when that communicates the supplied content better. Appropriate examples include a phishing email, suspicious link, fake sign-in page, account takeover warning, malware alert, unusual login activity, compromised cloud session, fraudulent message, unsafe attachment, security update, or incident dashboard. The screen must show the exact supported mechanism through recognizable interface structure, cursor focus, warning state, highlighted suspicious element, or security status—without inventing names, credentials, messages, CVEs, brands, or technical facts. Use screen capture only when directly relevant, and vary it with human/environment scenes rather than making every scene a screen.
+Every visualSuggestion must name one concrete setting or screen type, subjects if any, exact action, and relevant device; settings and compositions must not repeat across scenes. Keep people respectful, professional, realistic, culturally accurate, and relevant to the supplied alert.
+Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, subtitleEnglish, visualMode (environment/screen_capture/device_closeup), visualSetting, visualSuggestion. subtitleEnglish must be a faithful, concise English translation of voiceText, suitable for a single subtitle line; preserve product names, CVEs, versions and technical meaning exactly. The required action must be communicated clearly near the end.
 
 ALERT TITLE:
 {req.title}
@@ -252,6 +254,7 @@ SELECTED VISUAL STYLE:
             "onScreenText":" ".join(str(scene.get("onScreenText", "")).split()[:9]),
             "voiceText":str(scene.get("voiceText", "")).strip()[:700],
             "subtitleEnglish":" ".join(str(scene.get("subtitleEnglish", "")).strip().split())[:500],
+            "visualMode":str(scene.get("visualMode", "environment")).strip()[:40],
             "visualSetting":str(scene.get("visualSetting", "")).strip()[:160],
             "visualSuggestion":str(scene.get("visualSuggestion", "")).strip()[:500],
         })
@@ -278,13 +281,16 @@ def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
     return f'''Create a vertical 9:16 cinematic B-roll shot for an Arabic cybersecurity alert.
 Visual style: {styles.get(selected, styles["Cinematic AI"])}.
 Required setting: {scene.get("visualSetting") or "a real-world location directly relevant to the scene"}.
+Visual mode: {scene.get("visualMode") or "environment"}.
 Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
 Choose the environment from the required setting and factual content, not from generic cybersecurity imagery. Possible environments include private offices, open workplaces, meeting rooms, government service areas, reception spaces, home or family settings, remote-work desks, cafés, travel environments, data centers, technical rooms, and SOC facilities. Do not use a SOC, server room, large monitoring wall, or multiple cyber screens unless this exact scene requires it. Do not repeat the setting, camera angle, people arrangement, or main device used in another asset from this video.
+If visual mode is screen_capture, create a convincing full-frame or close-up screen-capture-style interface that directly depicts the supported event, such as a phishing email layout, suspicious hyperlink focus, fake login form, unusual login warning, malicious attachment state, malware alert, compromised session, or security update. Make the mechanism understandable through layout, icons, warning colors, cursor position, highlights and interface state. Do not invent personal data, credentials, sender names, domains, brands, CVEs, versions, or unsupported incident details. Any interface copy must be abstract, blurred or non-readable; the separate video overlay supplies the real text.
 Show culturally accurate Emirati people where relevant. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Family members and children may appear only for relevant personal or family cybersecurity awareness, in a natural, respectful UAE home context. Keep wardrobe culturally accurate and professional. Include realistic phones, tablets, laptops, office computers, home devices, security screens, or servers only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
 
 def _cinematic_still_prompt(scene: dict[str, Any], req: VisualAlertRequest, index: int) -> str:
     directions = ["wide environmental establishing composition", "medium private-office composition", "over-the-shoulder device interaction", "human-centered conversational composition", "close-up action with environmental context", "calm wide closing composition"]
-    return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nDistinct still-image composition: {directions[index]}. Match this specific scene only and do not reuse the composition of another scene. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
+    composition = "full-frame realistic screen capture or tight device-screen close-up with a clearly visible incident state" if scene.get("visualMode") == "screen_capture" else directions[index]
+    return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nDistinct still-image composition: {composition}. Match this specific scene only and do not reuse the composition of another scene. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
 
 def _generate_veo_clip(prompt: str, output_path: Path):
     api_key = os.environ["GEMINI_API_KEY"]
