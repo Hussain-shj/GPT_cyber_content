@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.33.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.34.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -82,6 +82,7 @@ class VisualAlertRequest(BaseModel):
     content: str = Field(min_length=10, max_length=12000)
     required_action: str = Field(min_length=3, max_length=4000)
     visual_style: Literal["Auto", "Cinematic AI", "SOC Operations", "Executive GRC", "Cyber Awareness"] = "Cinematic AI"
+    video_count: Literal[1, 3] = 1
 
 class ArchivePost(BaseModel):
     id: str | None = None
@@ -203,7 +204,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.33.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.34.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -211,7 +212,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"review-before-render-v11", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"adaptive-video-image-count-v12", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -279,7 +280,7 @@ Show culturally accurate adult Emirati professionals where people are relevant. 
 
 def _cinematic_still_prompt(scene: dict[str, Any], req: VisualAlertRequest, index: int) -> str:
     directions = ["wide establishing composition", "medium workstation composition", "over-the-shoulder composition", "executive close-up composition", "server-room depth composition", "calm professional closing composition"]
-    return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nStill image {index+1} of 6. Composition: {directions[index]}. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
+    return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nDistinct still-image composition: {directions[index]}. Match this specific scene only and do not reuse the composition of another scene. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
 
 def _generate_veo_clip(prompt: str, output_path: Path):
     api_key = os.environ["GEMINI_API_KEY"]
@@ -471,17 +472,20 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
         _fit_scene_durations(script, duration)
         clip_paths, image_paths = [], []
         selected = [script["scenes"][i % len(script["scenes"])] for i in range(6)]
-        _visual_job_update(job_id, status="generating_visuals", progress=46, message="جاري إنشاء مقطع Veo السينمائي الوحيد...", script=script)
-        clip_path = work_dir / "veo-source.mp4"
-        try:
-            _generate_veo_clip(_veo_prompt(selected[0], req) + "\nOpening hero shot. Slow cinematic dolly-in. Make it suitable as the main motion clip.", clip_path)
-            clip_paths.append(str(clip_path))
-        except Exception as veo_error:
-            if "429" not in str(veo_error) and "quota" not in str(veo_error).lower(): raise
-            _visual_job_update(job_id, message="حصة Veo مستخدمة اليوم؛ ستظهر الصور والتعليق للمراجعة دون فيديو.", veo_fallback=str(veo_error)[:500])
-        image_indices = (1, 3, 5)
+        for video_index in range(req.video_count):
+            _visual_job_update(job_id, status="generating_visuals", progress=46+video_index*5, message=f"جاري إنشاء الفيديو {video_index+1} من {req.video_count}...", script=script)
+            clip_path = work_dir / f"veo-source-{video_index+1}.mp4"
+            try:
+                scene = selected[(video_index * 2) % len(selected)]
+                _generate_veo_clip(_veo_prompt(scene, req) + f"\nUnique video shot {video_index+1} of {req.video_count}. Use a distinct camera angle and scene composition. Do not repeat any earlier shot.", clip_path)
+                clip_paths.append(str(clip_path))
+            except Exception as veo_error:
+                if "429" not in str(veo_error) and "quota" not in str(veo_error).lower(): raise
+                _visual_job_update(job_id, message=f"توقّف Veo عند {len(clip_paths)} فيديو بسبب الحصة؛ سيتم ضبط عدد الصور تلقائيًا.", veo_fallback=str(veo_error)[:500])
+                break
+        image_indices = (1, 3, 5) if len(clip_paths) == 3 else (1, 2, 3, 4, 5) if len(clip_paths) == 1 else (0, 1, 2, 3, 4, 5)
         for position, i in enumerate(image_indices, 1):
-            _visual_job_update(job_id, status="generating_visuals", progress=52+position*6, message=f"جاري إنشاء الصورة {position} من 3 حسب محتوى المشهد...", script=script)
+            _visual_job_update(job_id, status="generating_visuals", progress=min(74, 52+position*4), message=f"جاري إنشاء الصورة {position} من {len(image_indices)} حسب محتوى المشهد...", script=script)
             image_b64, _ = generate_nano_banana_image(_cinematic_still_prompt(selected[i], req, i), "9:16")
             image_path = work_dir / f"ai-scene-{position}.jpg"
             image_path.write_bytes(base64.b64decode(image_b64)); image_paths.append(str(image_path))
@@ -497,7 +501,7 @@ def _render_approved_visual_alert(job_id: str):
             work_dir = Path(job["work_dir"]); script = job["script"]
         audio_path = work_dir / "voiceover.wav"
         music_path = work_dir / "inspirational-corporate.wav"
-        clip_paths = [str(work_dir / "veo-source.mp4")] if (work_dir / "veo-source.mp4").exists() else []
+        clip_paths = [str(path) for path in sorted(work_dir.glob("veo-source-*.mp4"))]
         image_paths = [str(path) for path in sorted(work_dir.glob("ai-scene-*.jpg"))]
         _visual_job_update(job_id, status="rendering", progress=84, message="تمت الموافقة؛ جاري دمج الفيديو والصور والصوت...")
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
@@ -536,11 +540,12 @@ def approve_visual_alert(job_id: str):
     threading.Thread(target=_render_approved_visual_alert, args=(job_id,), daemon=True).start()
     return {"id":job_id, "status":"approval_received", "progress":80}
 
-@app.get("/api/visual-alert/preview-video/{job_id}")
-def visual_alert_preview_video(job_id: str):
+@app.get("/api/visual-alert/preview-video/{job_id}/{video_number}")
+def visual_alert_preview_video(job_id: str, video_number: int):
+    if video_number not in {1, 2, 3}: raise HTTPException(404, "رقم الفيديو غير صالح")
     with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
     if not job or job.get("status") not in {"ready_for_review", "approval_received", "rendering", "completed"}: raise HTTPException(404, "معاينة الفيديو غير جاهزة")
-    path = Path(job["work_dir"]) / "veo-source.mp4"
+    path = Path(job["work_dir"]) / f"veo-source-{video_number}.mp4"
     if not path.exists(): raise HTTPException(404, "لا توجد لقطة فيديو بسبب حدود Veo الحالية")
     return FileResponse(path, media_type="video/mp4", filename=f"preview-{job_id[:8]}.mp4")
 
@@ -554,7 +559,7 @@ def visual_alert_preview_audio(job_id: str):
 
 @app.get("/api/visual-alert/preview-image/{job_id}/{image_number}")
 def visual_alert_preview_image(job_id: str, image_number: int):
-    if image_number not in {1, 2, 3}: raise HTTPException(404, "رقم الصورة غير صالح")
+    if image_number < 1 or image_number > 6: raise HTTPException(404, "رقم الصورة غير صالح")
     with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
     if not job or job.get("status") not in {"ready_for_review", "approval_received", "rendering", "completed"}: raise HTTPException(404, "معاينة الصورة غير جاهزة")
     path = Path(job["work_dir"]) / f"ai-scene-{image_number}.jpg"
