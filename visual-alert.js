@@ -39,7 +39,7 @@
         <textarea id="vaAction" rows="5" maxlength="4000" placeholder="أدخل الإجراءات المطلوب اتخاذها"></textarea>
         <label>النمط البصري</label>
         <select id="vaVisualStyle"><option value="Cinematic AI">Cinematic AI — سينمائي واقعي</option><option value="Auto">تلقائي حسب المحتوى</option><option value="SOC Operations">مركز عمليات SOC</option><option value="Executive GRC">مؤسسي وGRC</option><option value="Cyber Awareness">توعية سيبرانية</option></select>
-        <button id="vaGenerate" class="action va-generate">🎬 إنشاء الفيديو</button>
+        <button id="vaGenerate" class="action va-generate">🎬 إنشاء مواد المعاينة</button>
         <div id="vaStatus" class="status"></div>
         <div id="vaProgressWrap" class="va-progress-wrap hidden"><div class="va-progress"><span id="vaProgressBar"></span></div><div id="vaSteps" class="va-steps"></div></div>
       </div>
@@ -53,9 +53,10 @@
       .va-progress-wrap{max-width:820px;margin:18px auto}.va-progress{height:12px;background:#06101d;border:1px solid #294760;border-radius:20px;overflow:hidden}
       .va-progress span{display:block;width:0;height:100%;background:linear-gradient(90deg,#0a84ff,#1bd3cf);transition:width .45s ease}.va-steps{text-align:center;color:#77f2ee;margin-top:9px}
       .va-result{max-width:820px;margin:20px auto}.va-player{display:block;width:min(100%,390px);aspect-ratio:9/16;margin:0 auto;background:#02070c;border:1px solid #1bd3cf55;border-radius:18px}
+      .va-review-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.va-review-card{padding:10px;background:#071421;border:1px solid #294760;border-radius:14px}.va-review-card h4{margin:0 0 8px}.va-review-card img,.va-review-card video{display:block;width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:10px;background:#02070c}.va-audio{width:100%;margin:10px 0 4px}.va-review-note{padding:12px;border-radius:12px;background:#10283a;color:#c8f8f5;text-align:center}
       .va-actions{display:flex;justify-content:center;gap:9px;flex-wrap:wrap;margin-top:14px}.va-actions a{text-decoration:none}.va-script{margin-top:18px;padding:14px;border:1px solid #294760;border-radius:13px;background:#081827}
       .va-scene{padding:10px 0;border-bottom:1px solid #1b3147}.va-scene:last-child{border-bottom:0}.va-scene b{color:#77f2ee}.va-scene p{margin:5px 0;color:#c6d5e5}
-      @media(max-width:640px){.va-section{padding:14px}.va-generate{width:100%}}
+      @media(max-width:640px){.va-section{padding:14px}.va-generate{width:100%}.va-review-grid{grid-template-columns:1fr 1fr}}
     `;
     document.head.appendChild(style);
 
@@ -110,9 +111,28 @@
       if (!response.ok) throw new Error(job.detail || "تعذر قراءة حالة الفيديو");
       updateProgress(job.progress, job.message);
       if (job.status === "failed") throw new Error(job.detail || job.message || "تعذر إنشاء الفيديو");
+      if (job.status === "ready_for_review") return showReview(jobId, job);
       if (job.status === "completed") return showResult(jobId, job.script || {});
       pollTimer = setTimeout(() => poll(jobId), 2500);
     } catch (err) { fail(err.message); }
+  }
+
+  function showReview(jobId, job) {
+    byId("vaGenerate").disabled = false;
+    const video = job.clip_count ? `<div class="va-review-card"><h4>لقطة الفيديو</h4><video controls playsinline preload="metadata" src="/api/visual-alert/preview-video/${encodeURIComponent(jobId)}"></video></div>` : `<div class="va-review-card"><h4>لقطة الفيديو</h4><p>لم تتوفر بسبب حد Veo اليومي. يمكنك مراجعة الصور والصوت أو إعادة المحاولة لاحقًا.</p></div>`;
+    const images = [1,2,3].map((n) => `<div class="va-review-card"><h4>الصورة ${n}</h4><img src="/api/visual-alert/preview-image/${encodeURIComponent(jobId)}/${n}" alt="معاينة الصورة ${n}"></div>`).join("");
+    const scenes = ((job.script || {}).scenes || []).map((scene) => `<div class="va-scene"><b>${esc(scene.onScreenText)}</b><p>${esc(scene.voiceText)}</p><p lang="en" dir="ltr">${esc(scene.subtitleEnglish)}</p></div>`).join("");
+    byId("vaResult").innerHTML = `<div class="va-review-note">راجع الفيديو والصور والتعليق الصوتي. لن يتم الدمج قبل موافقتك.</div><div class="va-review-grid">${video}${images}</div><div class="va-review-card"><h4>التعليق الصوتي العربي</h4><audio class="va-audio" controls preload="metadata" src="/api/visual-alert/preview-audio/${encodeURIComponent(jobId)}"></audio></div><div class="va-actions"><button id="vaApprove" class="action">✅ موافقة ودمج الفيديو</button><button id="vaReject" class="action secondary">إعادة إنشاء المواد</button></div>${scenes ? `<details class="va-script"><summary>مراجعة النص والترجمة</summary>${scenes}</details>` : ""}`;
+    byId("vaApprove").onclick = async () => {
+      byId("vaApprove").disabled = true; byId("vaReject").disabled = true;
+      try {
+        const response = await fetch(`/api/visual-alert/approve/${encodeURIComponent(jobId)}`, {method:"POST"});
+        const data = await responseData(response);
+        if (!response.ok) throw new Error(data.detail || "تعذر اعتماد المواد");
+        updateProgress(80, "تمت الموافقة؛ جاري دمج الفيديو..."); poll(jobId);
+      } catch (err) { fail(err.message); }
+    };
+    byId("vaReject").onclick = generate;
   }
 
   function showResult(jobId, script) {
