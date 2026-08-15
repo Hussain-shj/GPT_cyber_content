@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.40.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.41.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -83,6 +83,9 @@ class VisualAlertRequest(BaseModel):
     required_action: str = Field(min_length=3, max_length=4000)
     visual_style: Literal["Auto", "Cinematic AI", "SOC Operations", "Executive GRC", "Cyber Awareness"] = "Cinematic AI"
     video_count: Literal[0, 1, 3] = 1
+
+class VisualIdeaRequest(BaseModel):
+    idea: str = Field(min_length=3, max_length=6000)
 
 class VisualApprovalRequest(BaseModel):
     asset_order: list[str] = Field(default_factory=list, max_length=6)
@@ -208,7 +211,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.40.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.41.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -216,13 +219,39 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"optional-motion-overlays-v18", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"idea-to-editable-fields-v19", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
 def _visual_job_update(job_id: str, **values):
     with VISUAL_ALERT_JOBS_LOCK:
         if job_id in VISUAL_ALERT_JOBS: VISUAL_ALERT_JOBS[job_id].update(values)
+
+@app.post("/api/visual-alert/analyze-idea")
+def analyze_visual_alert_idea(req: VisualIdeaRequest):
+    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
+    prompt = f'''You are the Arabic content strategist for a UAE cybersecurity awareness channel.
+Turn the user's rough idea into editable input fields for a vertical awareness video of 38-50 seconds.
+Write clear Modern Standard Arabic suitable for UAE government and enterprise audiences. Keep the tone practical, calm, concise and human-centered.
+Do not invent CVEs, dates, vendors, incidents, statistics, laws, exploitation claims, product versions or technical facts that the user did not supply. If the idea is general awareness, develop it using durable best practices without pretending a specific incident occurred.
+The content must be 70-105 Arabic words and explain the issue, why it matters, and the safe behavior. The required_action must contain 3-5 short actionable lines separated by newlines, with no numbering or Markdown. The title must be compelling but factual, maximum 10 words.
+Choose visual_style from exactly: Cinematic AI, Auto, SOC Operations, Executive GRC, Cyber Awareness. Prefer Cyber Awareness for personal behavior, families, phishing, passwords, social media or AI-use topics; Executive GRC for governance and management; SOC Operations only for genuinely technical operational incidents; otherwise Cinematic AI.
+Return ONLY valid JSON with: title, content, required_action, visual_style.
+
+USER IDEA:
+{req.idea}'''
+    try:
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        data = extract_json(client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text)
+        allowed_styles = {"Cinematic AI", "Auto", "SOC Operations", "Executive GRC", "Cyber Awareness"}
+        title = " ".join(str(data.get("title", "")).split())[:500]
+        content = str(data.get("content", "")).strip()[:12000]
+        required_action = str(data.get("required_action", "")).strip()[:4000]
+        if len(title) < 3 or len(content) < 10 or len(required_action) < 3: raise ValueError("لم تكتمل الحقول المقترحة")
+        style = str(data.get("visual_style", "Cinematic AI"))
+        return {"title":title, "content":content, "required_action":required_action, "visual_style":style if style in allowed_styles else "Cinematic AI"}
+    except Exception as exc:
+        raise HTTPException(500, f"تعذر تحليل الفكرة: {str(exc)[:700]}")
 
 def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
