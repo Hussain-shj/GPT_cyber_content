@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.43.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.44.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -82,6 +82,7 @@ class VisualAlertRequest(BaseModel):
     content: str = Field(min_length=10, max_length=12000)
     required_action: str = Field(min_length=3, max_length=4000)
     visual_style: Literal["Auto", "Cinematic AI", "SOC Operations", "Executive GRC", "Cyber Awareness"] = "Cinematic AI"
+    threat_visual_style: Literal["Auto by Content", "Warning Screens", "Mobile Alerts", "System Errors and Updates", "Concerned User", "Anonymous Hacker", "Mixed Cyber Threats"] = "Auto by Content"
     video_count: Literal[0, 1, 3] = 1
 
 class VisualIdeaRequest(BaseModel):
@@ -211,7 +212,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.43.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.44.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -219,7 +220,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"formatted-social-copy-v21", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"selectable-threat-editorial-styles-v22", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -306,7 +307,11 @@ REQUIRED ACTION:
 {req.required_action}
 
 SELECTED VISUAL STYLE:
-{req.visual_style}'''
+{req.visual_style}
+
+PREFERRED THREAT EDITORIAL STYLE:
+{req.threat_visual_style}
+Treat this as a preferred visual option for relevant scenes, not a requirement to repeat it in every asset. When "Mixed Cyber Threats" is selected, deliberately vary among red warning screens, mobile alerts, system errors or updates, a concerned device user, and an anonymous attacker only where factually appropriate.'''
     raw = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text
     data = extract_json(raw)
     scenes = data.get("scenes") if isinstance(data, dict) else None
@@ -344,11 +349,21 @@ def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
     selected = req.visual_style
     if selected == "Auto":
         selected = "Executive GRC" if scene.get("type") == "action" else "Cyber Awareness" if scene.get("type") in {"risk","content"} else "Cinematic AI"
+    threat_styles = {
+        "Auto by Content":"Choose the most accurate threat visual motif from the factual scene.",
+        "Warning Screens":"Prefer a close laptop or desktop with multiple translucent red warning triangles and a clear compromised-system state; people are optional.",
+        "Mobile Alerts":"Prefer a close smartphone in hand showing a bold warning-state interface, with a softly blurred workstation behind it.",
+        "System Errors and Updates":"Prefer a realistic laptop or device showing an error, failed update, urgent security patch, or remediation state supported by the scene.",
+        "Concerned User":"Prefer a realistic concerned office worker reacting to a phone or laptop warning, using red risk light only around the affected device.",
+        "Anonymous Hacker":"Prefer an anonymous hooded silhouette at a laptop with dark navy/cyan lighting, only when an attacker, intrusion, phishing or compromise is explicitly supported.",
+        "Mixed Cyber Threats":"Select one distinct motif appropriate to this scene: red warning screen, mobile alert, system error/update, concerned user, or anonymous attacker. Do not repeat the motif used by another asset.",
+    }
     return f'''Create a vertical 9:16 cinematic B-roll shot for an Arabic cybersecurity alert.
 Visual style: {styles.get(selected, styles["Cinematic AI"])}.
 Required setting: {scene.get("visualSetting") or "a real-world location directly relevant to the scene"}.
 Visual mode: {scene.get("visualMode") or "environment"}.
 Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
+Preferred threat editorial motif: {threat_styles.get(req.threat_visual_style, threat_styles["Auto by Content"])}
 Campaign visual language: premium UAE public-awareness film, human-centered documentary realism, natural expressions and everyday actions, refined dark navy-to-teal cinematic color grade, soft practical lighting, shallow depth of field, polished but believable government communication style. Compose the subject in the middle and lower portions while preserving clean, low-detail negative space around the lower-middle text zone. Do not generate any text inside the visual asset; typography is added later by the video renderer.
 Choose the environment from the required setting and factual content, not from generic cybersecurity imagery. Possible environments include private offices, open workplaces, meeting rooms, government service areas, reception spaces, home or family settings, remote-work desks, cafés, travel environments, data centers, technical rooms, and SOC facilities. Do not use a SOC, server room, large monitoring wall, or multiple cyber screens unless this exact scene requires it. Do not repeat the setting, camera angle, people arrangement, or main device used in another asset from this video.
 If visual mode is screen_capture, create a convincing full-frame or close-up screen-capture-style interface that directly depicts the supported event, such as a phishing email layout, suspicious hyperlink focus, fake login form, unusual login warning, malicious attachment state, malware alert, compromised session, or security update. Make the mechanism understandable through layout, icons, warning colors, cursor position, highlights and interface state. Do not invent personal data, credentials, sender names, domains, brands, CVEs, versions, or unsupported incident details. Any interface copy must be abstract, blurred or non-readable; the separate video overlay supplies the real text.
@@ -610,7 +625,7 @@ def _render_approved_visual_alert(job_id: str):
         with VISUAL_ALERT_JOBS_LOCK:
             job = VISUAL_ALERT_JOBS.get(job_id)
             if not job: return
-            work_dir = Path(job["work_dir"]); script = job["script"]; asset_order = job.get("asset_order", []); motion_overlays = bool(job.get("motion_overlays"))
+            work_dir = Path(job["work_dir"]); script = job["script"]; asset_order = job.get("asset_order", []); motion_overlays = bool(job.get("motion_overlays")); threat_visual_style = job.get("threat_visual_style", "Auto by Content")
         audio_path = work_dir / "voiceover.wav"
         music_path = work_dir / "inspirational-corporate.wav"
         clip_paths = [str(path) for path in sorted(work_dir.glob("veo-source-*.mp4"))]
@@ -620,7 +635,7 @@ def _render_approved_visual_alert(job_id: str):
         if len(visual_assets) != len(asset_lookup): raise ValueError("ترتيب المواد غير مكتمل")
         _visual_job_update(job_id, status="rendering", progress=84, message="تمت الموافقة؛ جاري دمج الفيديو والصور والصوت...")
         props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets, "motionOverlays":motion_overlays}, ensure_ascii=False), encoding="utf-8")
+        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets, "motionOverlays":motion_overlays, "threatVisualStyle":threat_visual_style}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
         _visual_job_update(job_id, status="rendering", progress=96, message="جاري ضبط الموسيقى والصوت إلى المستوى المرجعي...")
@@ -636,7 +651,7 @@ def create_visual_alert(req: VisualAlertRequest):
     _cleanup_visual_jobs()
     job_id = str(uuid.uuid4())
     with VISUAL_ALERT_JOBS_LOCK:
-        VISUAL_ALERT_JOBS[job_id] = {"id":job_id, "status":"pending", "progress":3, "message":"تم إنشاء المهمة", "created_ts":time.time(), "created_at":datetime.now(timezone.utc).isoformat()}
+        VISUAL_ALERT_JOBS[job_id] = {"id":job_id, "status":"pending", "progress":3, "message":"تم إنشاء المهمة", "threat_visual_style":req.threat_visual_style, "created_ts":time.time(), "created_at":datetime.now(timezone.utc).isoformat()}
     threading.Thread(target=_run_visual_alert_job, args=(job_id, req), daemon=True).start()
     return {"id":job_id, "status":"pending", "progress":3, "message":"تم إنشاء المهمة"}
 
