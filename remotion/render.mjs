@@ -10,7 +10,7 @@ const props = JSON.parse(fs.readFileSync(propsFile, "utf8"));
 const wav = fs.readFileSync(props.audioPath);
 const music = fs.readFileSync(props.musicPath);
 const visualAssetsDataUris=(props.visualAssets||[]).map((asset)=>({type:asset.type,src:`data:${asset.type==="video"?"video/mp4":"image/jpeg"};base64,${fs.readFileSync(asset.path).toString("base64")}`}));
-const inputProps = {script:props.script,audioDataUri:`data:audio/wav;base64,${wav.toString("base64")}`,musicDataUri:`data:audio/wav;base64,${music.toString("base64")}`,visualAssetsDataUris,motionOverlays:Boolean(props.motionOverlays)};
+const inputProps = {script:props.script,audioDataUri:`data:audio/wav;base64,${wav.toString("base64")}`,musicDataUri:`data:audio/wav;base64,${music.toString("base64")}`,visualAssetsDataUris,motionOverlays:Boolean(props.motionOverlays),threatVisualStyle:props.threatVisualStyle||"Auto by Content"};
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serveUrl = await bundle({entryPoint:path.join(here,"index.jsx")});
 const composition = await selectComposition({serveUrl,id:"CyberAlertVideo",inputProps});
