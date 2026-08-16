@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.41.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.42.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -211,7 +211,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.41.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.42.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -219,7 +219,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"idea-to-editable-fields-v19", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"editable-audio-conclusion-technical-scenes-v20", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -234,7 +234,7 @@ def analyze_visual_alert_idea(req: VisualIdeaRequest):
 Turn the user's rough idea into editable input fields for a vertical awareness video of 38-50 seconds.
 Write clear Modern Standard Arabic suitable for UAE government and enterprise audiences. Keep the tone practical, calm, concise and human-centered.
 Do not invent CVEs, dates, vendors, incidents, statistics, laws, exploitation claims, product versions or technical facts that the user did not supply. If the idea is general awareness, develop it using durable best practices without pretending a specific incident occurred.
-The content must be 70-105 Arabic words and explain the issue, why it matters, and the safe behavior. The required_action must contain 3-5 short actionable lines separated by newlines, with no numbering or Markdown. The title must be compelling but factual, maximum 10 words.
+The content must be 70-105 Arabic words and explain the issue, why it matters, and the safe behavior. End the content with a short final paragraph beginning exactly with "الخلاصة:" that gives one memorable practical takeaway. The required_action must contain 3-5 short actionable lines separated by newlines, with no numbering or Markdown. The title must be compelling but factual, maximum 10 words.
 Choose visual_style from exactly: Cinematic AI, Auto, SOC Operations, Executive GRC, Cyber Awareness. Prefer Cyber Awareness for personal behavior, families, phishing, passwords, social media or AI-use topics; Executive GRC for governance and management; SOC Operations only for genuinely technical operational incidents; otherwise Cinematic AI.
 Return ONLY valid JSON with: title, content, required_action, visual_style.
 
@@ -259,9 +259,10 @@ def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
 Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
 Target 38-50 seconds and never exceed 55 seconds. The combined voiceText across ALL scenes must be no more than 100 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text.
 Build a visually diverse sequence driven by the meaning of each scene. Do NOT default every scene to a SOC, control room, server room, or wall of screens. Choose a different appropriate real-world setting for each scene from possibilities such as a private employee office, open-plan workplace, executive office, meeting room, government service counter, reception, remote-work desk, home living room, family using phones or a laptop, café, airport or travel setting, data center, technical workshop, or SOC. Use a SOC or server room only when the supplied alert specifically supports it. A family or home scene is allowed only when the content concerns personal cyber safety, children, parents, home devices, scams, passwords, social media, or public awareness.
-A scene may instead be a realistic screen-capture-style visual when that communicates the supplied content better. Appropriate examples include a phishing email, suspicious link, fake sign-in page, account takeover warning, malware alert, unusual login activity, compromised cloud session, fraudulent message, unsafe attachment, security update, or incident dashboard. The screen must show the exact supported mechanism through recognizable interface structure, cursor focus, warning state, highlighted suspicious element, or security status—without inventing names, credentials, messages, CVEs, brands, or technical facts. Use screen capture only when directly relevant, and vary it with human/environment scenes rather than making every scene a screen.
+A scene may instead contain no people and use a realistic screen-capture-style or object-focused visual when that communicates the supplied content better. Appropriate examples include a red compromised computer screen, phishing email, suspicious link, fake sign-in page, account takeover warning, malware alert, unusual login activity, compromised cloud session, fraudulent message, unsafe attachment, security update, patch deployment, locked device, or incident dashboard. The screen must show the exact supported mechanism through recognizable interface structure, cursor focus, warning state, highlighted suspicious element, or security status—without inventing names, credentials, messages, CVEs, brands, or technical facts. Use screen capture only when directly relevant, and vary it with other scene types rather than making every scene a screen.
+An anonymous hooded attacker at a laptop may be used as a dark navy/cyan cinematic silhouette similar to a serious cybersecurity editorial photograph, but ONLY when the supplied content directly discusses an attacker, active hacking, compromise, intrusion, malware operation or theft. Keep the face obscured, do not identify a nationality, organization or real person, and do not use this image as a generic decoration for ordinary awareness topics.
 Every visualSuggestion must name one concrete setting or screen type, subjects if any, exact action, and relevant device; settings and compositions must not repeat across scenes. Keep people respectful, professional, realistic, culturally accurate, and relevant to the supplied alert.
-Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, subtitleEnglish, visualMode (environment/screen_capture/device_closeup), visualSetting, visualSuggestion. subtitleEnglish must be a faithful, concise English translation of voiceText, suitable for a single subtitle line; preserve product names, CVEs, versions and technical meaning exactly. The required action must be communicated clearly near the end.
+Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, subtitleEnglish, visualMode (environment/screen_capture/device_closeup/object_only/hacker_scene), visualSetting, visualSuggestion. subtitleEnglish must be a faithful, concise English translation of voiceText, suitable for a single subtitle line; preserve product names, CVEs, versions and technical meaning exactly. The required action must be communicated clearly near the end. The FINAL scene must always be type outro and provide a concise conclusion or memorable takeaway based only on the supplied content.
 
 ALERT TITLE:
 {req.title}
@@ -319,11 +320,13 @@ Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
 Campaign visual language: premium UAE public-awareness film, human-centered documentary realism, natural expressions and everyday actions, refined dark navy-to-teal cinematic color grade, soft practical lighting, shallow depth of field, polished but believable government communication style. Compose the subject in the middle and lower portions while preserving clean, low-detail negative space around the lower-middle text zone. Do not generate any text inside the visual asset; typography is added later by the video renderer.
 Choose the environment from the required setting and factual content, not from generic cybersecurity imagery. Possible environments include private offices, open workplaces, meeting rooms, government service areas, reception spaces, home or family settings, remote-work desks, cafés, travel environments, data centers, technical rooms, and SOC facilities. Do not use a SOC, server room, large monitoring wall, or multiple cyber screens unless this exact scene requires it. Do not repeat the setting, camera angle, people arrangement, or main device used in another asset from this video.
 If visual mode is screen_capture, create a convincing full-frame or close-up screen-capture-style interface that directly depicts the supported event, such as a phishing email layout, suspicious hyperlink focus, fake login form, unusual login warning, malicious attachment state, malware alert, compromised session, or security update. Make the mechanism understandable through layout, icons, warning colors, cursor position, highlights and interface state. Do not invent personal data, credentials, sender names, domains, brands, CVEs, versions, or unsupported incident details. Any interface copy must be abstract, blurred or non-readable; the separate video overlay supplies the real text.
-Show culturally accurate Emirati people where relevant. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Family members and children may appear only for relevant personal or family cybersecurity awareness, in a natural, respectful UAE home context. Keep wardrobe culturally accurate and professional. Include realistic phones, tablets, laptops, office computers, home devices, security screens, or servers only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, hooded hacker clichés, or fantasy interfaces.'''
+If visual mode is object_only or device_closeup, show the relevant screen, device, update, patch, warning, email or technical object without any person in frame. If visual mode is hacker_scene, show one anonymous hooded attacker as a face-obscured silhouette behind a laptop in a dark navy and cyan cinematic environment, similar to a serious cybersecurity editorial photograph. Use hacker_scene only when the supplied facts explicitly support an attacker, hacking or compromise; never imply identity or attribution.
+Show culturally accurate Emirati people only where people improve the scene. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Family members and children may appear only for relevant personal or family cybersecurity awareness, in a natural, respectful UAE home context. Keep wardrobe culturally accurate and professional. Include realistic phones, tablets, laptops, office computers, home devices, security screens, or servers only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, sensational criminal stereotypes, or fantasy interfaces.'''
 
 def _cinematic_still_prompt(scene: dict[str, Any], req: VisualAlertRequest, index: int) -> str:
     directions = ["wide environmental establishing composition", "medium private-office composition", "over-the-shoulder device interaction", "human-centered conversational composition", "close-up action with environmental context", "calm wide closing composition"]
-    composition = "full-frame realistic screen capture or tight device-screen close-up with a clearly visible incident state" if scene.get("visualMode") == "screen_capture" else directions[index]
+    mode = scene.get("visualMode")
+    composition = "anonymous hooded attacker silhouette centered behind a laptop, face fully obscured, dark navy/cyan editorial lighting" if mode == "hacker_scene" else "full-frame realistic screen capture or tight device-screen close-up with a clearly visible incident state and no people" if mode in {"screen_capture", "object_only", "device_closeup"} else directions[index]
     return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nDistinct still-image composition: {composition}. Match this specific scene only and do not reuse the composition of another scene. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
 
 def _generate_veo_clip(prompt: str, output_path: Path):
@@ -549,6 +552,27 @@ def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
     except Exception as exc:
         _visual_job_update(job_id, status="failed", message=str(exc)[:1400], detail=str(exc)[:1400], completed_at=datetime.now(timezone.utc).isoformat())
 
+def _regenerate_visual_alert_audio(job_id: str, req: VisualAlertRequest):
+    with VISUAL_ALERT_JOBS_LOCK:
+        job = VISUAL_ALERT_JOBS.get(job_id)
+        if not job: return
+        work_dir = Path(job["work_dir"])
+    try:
+        script = _visual_script(req)
+        _visual_job_update(job_id, status="regenerating_audio", progress=42, message="جاري إعادة إنشاء التعليق الصوتي من المحتوى المعدّل...", script=script)
+        audio, mime_type, sample_rate, channels = _gemini_tts(script)
+        new_audio = work_dir / "voiceover-new.wav"
+        duration = _write_wav(new_audio, audio, mime_type, sample_rate, channels)
+        duration = _limit_voice_duration(new_audio, duration)
+        new_music = work_dir / "inspirational-corporate-new.wav"
+        _write_corporate_music(new_music, duration)
+        _fit_scene_durations(script, duration)
+        shutil.move(str(new_audio), str(work_dir / "voiceover.wav"))
+        shutil.move(str(new_music), str(work_dir / "inspirational-corporate.wav"))
+        _visual_job_update(job_id, status="ready_for_review", progress=78, message="تم تحديث النص والتعليق الصوتي. الصور والفيديوهات لم تتغير.", script=script, audio_regenerated=True, audio_regeneration_error=None)
+    except Exception as exc:
+        _visual_job_update(job_id, status="ready_for_review", progress=78, message="تعذر إعادة توليد الصوت؛ بقي الصوت السابق متاحًا.", audio_regeneration_error=str(exc)[:900])
+
 def _render_approved_visual_alert(job_id: str):
     try:
         with VISUAL_ALERT_JOBS_LOCK:
@@ -590,6 +614,16 @@ def visual_alert_status(job_id: str):
         job = VISUAL_ALERT_JOBS.get(job_id)
         if not job: raise HTTPException(404, "المهمة غير موجودة أو انتهت صلاحيتها")
         return {k:v for k,v in job.items() if k not in {"work_dir", "created_ts"}}
+
+@app.post("/api/visual-alert/regenerate-audio/{job_id}", status_code=202)
+def regenerate_visual_alert_audio(job_id: str, req: VisualAlertRequest):
+    with VISUAL_ALERT_JOBS_LOCK:
+        job = VISUAL_ALERT_JOBS.get(job_id)
+        if not job: raise HTTPException(404, "المهمة غير موجودة أو انتهت صلاحيتها")
+        if job.get("status") != "ready_for_review": raise HTTPException(409, "انتظر حتى تصبح المواد جاهزة للمراجعة")
+        job.update(status="regenerating_audio", progress=35, message="تم استلام المحتوى المعدّل لإعادة توليد الصوت")
+    threading.Thread(target=_regenerate_visual_alert_audio, args=(job_id, req), daemon=True).start()
+    return {"id":job_id, "status":"regenerating_audio", "progress":35}
 
 @app.post("/api/visual-alert/approve/{job_id}", status_code=202)
 def approve_visual_alert(job_id: str, approval: VisualApprovalRequest):
