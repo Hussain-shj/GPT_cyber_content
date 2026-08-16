@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.45.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.46.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -220,7 +220,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.45.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.46.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -228,7 +228,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"google-drive-video-archive-v23", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"fixed-brand-outro-v24", "brand_outro":True, "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -240,7 +240,7 @@ def _visual_job_update(job_id: str, **values):
 def analyze_visual_alert_idea(req: VisualIdeaRequest):
     if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
     prompt = f'''You are the Arabic content strategist for a UAE cybersecurity awareness channel.
-Turn the user's rough idea into editable input fields for a vertical awareness video of 38-50 seconds.
+Turn the user's rough idea into editable input fields for a vertical awareness segment of 32-44 seconds; a fixed 10-second branded outro is appended later.
 Write clear Modern Standard Arabic suitable for UAE government and enterprise audiences. Keep the tone practical, calm, concise and human-centered.
 Do not invent CVEs, dates, vendors, incidents, statistics, laws, exploitation claims, product versions or technical facts that the user did not supply. If the idea is general awareness, develop it using durable best practices without pretending a specific incident occurred.
 The content must be 70-105 Arabic words and explain the issue, why it matters, and the safe behavior. End the content with a short final paragraph beginning exactly with "الخلاصة:" that gives one memorable practical takeaway. The required_action must contain 3-5 short actionable lines separated by newlines, with no numbering or Markdown. The title must be compelling but factual, maximum 10 words.
@@ -298,7 +298,7 @@ def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     prompt = f'''You are a professional cybersecurity short-form video editor.
 Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
-Target 38-50 seconds and never exceed 55 seconds. The combined voiceText across ALL scenes must be no more than 100 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text.
+Target 32-44 seconds and never exceed 46 seconds. A fixed 10-second branded outro is appended after these scenes, and the complete exported video must remain under 58 seconds. The combined voiceText across ALL scenes must be no more than 82 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text.
 Build a visually diverse sequence driven by the meaning of each scene. Do NOT default every scene to a SOC, control room, server room, or wall of screens. Choose a different appropriate real-world setting for each scene from possibilities such as a private employee office, open-plan workplace, executive office, meeting room, government service counter, reception, remote-work desk, home living room, family using phones or a laptop, café, airport or travel setting, data center, technical workshop, or SOC. Use a SOC or server room only when the supplied alert specifically supports it. A family or home scene is allowed only when the content concerns personal cyber safety, children, parents, home devices, scams, passwords, social media, or public awareness.
 A scene may instead contain no people and use a realistic screen-capture-style or object-focused visual when that communicates the supplied content better. Appropriate examples include a red compromised computer screen, phishing email, suspicious link, fake sign-in page, account takeover warning, malware alert, unusual login activity, compromised cloud session, fraudulent message, unsafe attachment, security update, patch deployment, locked device, or incident dashboard. The screen must show the exact supported mechanism through recognizable interface structure, cursor focus, warning state, highlighted suspicious element, or security status—without inventing names, credentials, messages, CVEs, brands, or technical facts. Use screen capture only when directly relevant, and vary it with other scene types rather than making every scene a screen.
 An anonymous hooded attacker at a laptop may be used as a dark navy/cyan cinematic silhouette similar to a serious cybersecurity editorial photograph, but ONLY when the supplied content directly discusses an attacker, active hacking, compromise, intrusion, malware operation or theft. Keep the face obscured, do not identify a nationality, organization or real person, and do not use this image as a generic decoration for ordinary awareness topics.
@@ -507,12 +507,12 @@ def _write_wav(path: Path, audio: bytes, mime_type: str = "audio/l16", sample_ra
     with wave.open(str(path), "rb") as wf:
         return wf.getnframes() / float(wf.getframerate())
 
-def _limit_voice_duration(path: Path, duration: float, maximum: float = 56.5) -> float:
+def _limit_voice_duration(path: Path, duration: float, maximum: float = 46.0) -> float:
     if duration <= maximum: return duration
     tempo = min(2.0, duration / maximum)
     adjusted = path.with_name("voiceover-adjusted.wav")
     result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-filter:a", f"atempo={tempo:.5f}", str(adjusted)], capture_output=True, text=True, timeout=120)
-    if result.returncode != 0 or not adjusted.exists(): raise ValueError("تعذر ضبط مدة التعليق الصوتي ضمن 58 ثانية")
+    if result.returncode != 0 or not adjusted.exists(): raise ValueError("تعذر ضبط مدة المحتوى قبل خاتمة العلامة التجارية")
     shutil.move(str(adjusted), str(path))
     with wave.open(str(path), "rb") as wf: return wf.getnframes() / float(wf.getframerate())
 
@@ -548,12 +548,23 @@ def _normalize_final_video_audio(path: Path):
     if result.returncode != 0 or not normalized.exists(): raise ValueError("تعذر ضبط مستوى الصوت النهائي إلى -14 LUFS")
     shutil.move(str(normalized), str(path))
 
+def _append_brand_outro(path: Path):
+    parts = sorted((BASE_DIR / "assets").glob("cyberpulse-outro.b64.part*"))
+    if not parts: raise ValueError("ملف خاتمة نبض سيبراني غير موجود")
+    outro = path.with_name("cyberpulse-brand-outro.mp4")
+    outro.write_bytes(base64.b64decode("".join(part.read_text(encoding="ascii") for part in parts)))
+    combined = path.with_name("visual-alert-with-outro.mp4")
+    filters = "[0:v]fps=30,scale=1080:1920,setsar=1[v0];[1:v]fps=30,scale=1080:1920,setsar=1[v1];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
+    result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-i", str(outro), "-filter_complex", filters, "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(combined)], capture_output=True, text=True, timeout=360)
+    if result.returncode != 0 or not combined.exists(): raise ValueError("تعذر دمج خاتمة نبض سيبراني: " + (result.stderr or result.stdout)[-700:])
+    shutil.move(str(combined), str(path))
+
 def _fit_scene_durations(script: dict[str, Any], audio_duration: float):
-    if audio_duration > 57: raise ValueError("تعذر ضبط التعليق الصوتي ضمن الحد الأقصى 58 ثانية")
+    if audio_duration > 46.5: raise ValueError("تعذر ضبط التعليق الصوتي قبل خاتمة العلامة التجارية")
     scenes = script["scenes"]
     weights = [max(1, len(s.get("voiceText", "").split())) for s in scenes]
     total = sum(weights)
-    target = min(57.5, max(18.0, audio_duration + 1.0))
+    target = min(47.0, max(18.0, audio_duration + 1.0))
     remaining = target
     for i, scene in enumerate(scenes):
         duration = remaining if i == len(scenes)-1 else max(2.5, target * weights[i] / total)
@@ -646,7 +657,9 @@ def _render_approved_visual_alert(job_id: str):
         props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets, "motionOverlays":motion_overlays, "threatVisualStyle":threat_visual_style}, ensure_ascii=False), encoding="utf-8")
         result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
         if result.returncode != 0: raise ValueError("فشل Remotion: " + (result.stderr or result.stdout)[-1200:])
-        _visual_job_update(job_id, status="rendering", progress=96, message="جاري ضبط الموسيقى والصوت إلى المستوى المرجعي...")
+        _visual_job_update(job_id, status="rendering", progress=94, message="جاري إضافة خاتمة نبض سيبراني...")
+        _append_brand_outro(output_path)
+        _visual_job_update(job_id, status="rendering", progress=97, message="جاري ضبط الموسيقى والصوت إلى المستوى المرجعي...")
         _normalize_final_video_audio(output_path)
         _visual_job_update(job_id, status="completed", progress=100, message="اكتمل الفيديو", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
     except Exception as exc:
