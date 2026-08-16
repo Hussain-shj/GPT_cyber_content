@@ -43,6 +43,9 @@
         <textarea id="vaAction" rows="5" maxlength="4000" placeholder="أدخل الإجراءات المطلوب اتخاذها"></textarea>
         <label>النمط البصري</label>
         <select id="vaVisualStyle"><option value="Cinematic AI">Cinematic AI — سينمائي واقعي</option><option value="Auto">تلقائي حسب المحتوى</option><option value="SOC Operations">مركز عمليات SOC</option><option value="Executive GRC">مؤسسي وGRC</option><option value="Cyber Awareness">توعية سيبرانية</option></select>
+        <label>الأسلوب التعبيري للتهديد — اختياري</label>
+        <select id="vaThreatVisualStyle"><option value="Auto by Content">تلقائي حسب المحتوى</option><option value="Warning Screens">شاشات تحذير حمراء</option><option value="Mobile Alerts">تنبيه على الهاتف</option><option value="System Errors and Updates">خطأ نظام أو تحديث أمني</option><option value="Concerned User">موظف قلق أمام الجهاز</option><option value="Anonymous Hacker">هاكر مجهول أو تصيّد</option><option value="Mixed Cyber Threats">مزيج متنوع</option></select>
+        <p class="va-field-help">يوجّه الصور والفيديوهات والرموز المتحركة عند ملاءمته للمحتوى، مع تنويع اللقطات وعدم تكرار الفكرة في جميع المواد.</p>
         <label>توزيع المواد البصرية</label>
         <select id="vaVideoCount"><option value="1">فيديو واحد + 5 صور</option><option value="3">3 فيديوهات + 3 صور</option><option value="0">6 صور فقط — بدون توليد فيديو</option></select>
         <div class="va-social-box">
@@ -62,7 +65,7 @@
     const style = document.createElement("style");
     style.textContent = `
       .va-section{max-width:1050px;margin:0 auto}.va-title h2{margin:0}.va-title p{margin:5px 0;color:#9eb2c9}
-      .va-form{max-width:820px;margin:18px auto}.va-form textarea{line-height:1.8}.va-analyze{display:block;margin:10px 0 4px}.va-social-box{margin-top:18px;padding:14px;border:1px solid #294760;border-radius:14px;background:#081827}.va-social-box h3{margin:0}.va-social-box textarea{margin:10px 0}.va-generate{display:block;min-width:220px;margin:18px auto 0}
+      .va-form{max-width:820px;margin:18px auto}.va-form textarea{line-height:1.8}.va-field-help{margin:7px 0 14px;color:#91a9c0;font-size:.92rem}.va-analyze{display:block;margin:10px 0 4px}.va-social-box{margin-top:18px;padding:14px;border:1px solid #294760;border-radius:14px;background:#081827}.va-social-box h3{margin:0}.va-social-box textarea{margin:10px 0}.va-generate{display:block;min-width:220px;margin:18px auto 0}
       .va-progress-wrap{max-width:820px;margin:18px auto}.va-progress{height:12px;background:#06101d;border:1px solid #294760;border-radius:20px;overflow:hidden}
       .va-progress span{display:block;width:0;height:100%;background:linear-gradient(90deg,#0a84ff,#1bd3cf);transition:width .45s ease}.va-steps{text-align:center;color:#77f2ee;margin-top:9px}
       .va-result{max-width:820px;margin:20px auto}.va-player{display:block;width:min(100%,390px);aspect-ratio:9/16;margin:0 auto;background:#02070c;border:1px solid #1bd3cf55;border-radius:18px}
@@ -119,7 +122,7 @@
     const button = byId("vaCreateSocial"); button.disabled = true;
     byId("vaSocialStatus").textContent = "جاري تنسيق المحتوى لمواقع التواصل...";
     try {
-      const response = await fetch("/api/visual-alert/social-copy", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),visual_style:byId("vaVisualStyle").value,video_count:Number(byId("vaVideoCount").value)})});
+      const response = await fetch("/api/visual-alert/social-copy", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),visual_style:byId("vaVisualStyle").value,threat_visual_style:byId("vaThreatVisualStyle").value,video_count:Number(byId("vaVideoCount").value)})});
       const data = await responseData(response); if (!response.ok) throw new Error(data.detail || "تعذر إنشاء المحتوى المنسق");
       byId("vaSocialCopy").value = data.social_copy || "";
       byId("vaSocialStatus").textContent = "تم إنشاء المحتوى. يمكنك تعديله ثم نسخه.";
@@ -142,7 +145,7 @@
     byId("vaProgressWrap").classList.remove("hidden");
     updateProgress(3, "بدء المهمة...");
     try {
-      const response = await fetch("/api/visual-alert/render", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:byId("vaTitle").value.trim(), content:byId("vaContent").value.trim(), required_action:byId("vaAction").value.trim(), visual_style:byId("vaVisualStyle").value, video_count:Number(byId("vaVideoCount").value)})});
+      const response = await fetch("/api/visual-alert/render", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({title:byId("vaTitle").value.trim(), content:byId("vaContent").value.trim(), required_action:byId("vaAction").value.trim(), visual_style:byId("vaVisualStyle").value, threat_visual_style:byId("vaThreatVisualStyle").value, video_count:Number(byId("vaVideoCount").value)})});
       const job = await responseData(response);
       if (!response.ok) throw new Error(job.detail || "تعذر بدء إنشاء الفيديو");
       poll(job.id);
@@ -184,7 +187,7 @@
       const error = validate(); if (error) return byId("vaStatus").textContent = error;
       byId("vaRegenerateAudio").disabled = true; byId("vaApprove").disabled = true; byId("vaReject").disabled = true;
       try {
-        const response = await fetch(`/api/visual-alert/regenerate-audio/${encodeURIComponent(jobId)}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),visual_style:byId("vaVisualStyle").value,video_count:Number(byId("vaVideoCount").value)})});
+        const response = await fetch(`/api/visual-alert/regenerate-audio/${encodeURIComponent(jobId)}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),visual_style:byId("vaVisualStyle").value,threat_visual_style:byId("vaThreatVisualStyle").value,video_count:Number(byId("vaVideoCount").value)})});
         const data = await responseData(response); if (!response.ok) throw new Error(data.detail || "تعذر بدء إعادة توليد الصوت");
         updateProgress(35, "جاري إعادة إنشاء النص والتعليق الصوتي..."); poll(jobId);
       } catch (err) { fail(err.message); }
