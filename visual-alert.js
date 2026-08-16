@@ -146,12 +146,21 @@
     byId("vaGenerate").disabled = false;
     let assets = (job.asset_order || []).map((token) => { const [type,number] = token.split(":"); return {token,type,number:Number(number)}; });
     const scenes = ((job.script || {}).scenes || []).map((scene) => `<div class="va-scene"><b>${esc(scene.onScreenText)}</b><p>${esc(scene.voiceText)}</p><p lang="en" dir="ltr">${esc(scene.subtitleEnglish)}</p></div>`).join("");
-    byId("vaResult").innerHTML = `<div class="va-review-note">رتّب المواد بالأسهم. سيستخدم الفيديو النهائي هذا الترتيب من اليمين إلى اليسار.</div><div id="vaAssetGrid" class="va-review-grid"></div><div class="va-review-card"><h4>التعليق الصوتي العربي</h4><audio class="va-audio" controls preload="metadata" src="/api/visual-alert/preview-audio/${encodeURIComponent(jobId)}"></audio></div><label class="check"><input id="vaMotionOverlays" type="checkbox"> إضافة رموز ومؤثرات متحركة مرتبطة بالمحتوى — اختياري</label><div class="va-actions"><button id="vaApprove" class="action">✅ موافقة ودمج الفيديو</button><button id="vaReject" class="action secondary">إعادة إنشاء المواد</button></div>${scenes ? `<details class="va-script"><summary>مراجعة النص والترجمة</summary>${scenes}</details>` : ""}`;
+    byId("vaResult").innerHTML = `<div class="va-review-note">رتّب المواد بالأسهم. سيستخدم الفيديو النهائي هذا الترتيب من اليمين إلى اليسار.</div>${job.audio_regeneration_error?`<div class="status">تعذر تحديث الصوت: ${esc(job.audio_regeneration_error)}</div>`:""}<div id="vaAssetGrid" class="va-review-grid"></div><div class="va-review-card"><h4>التعليق الصوتي العربي</h4><audio class="va-audio" controls preload="metadata" src="/api/visual-alert/preview-audio/${encodeURIComponent(jobId)}?v=${Date.now()}"></audio></div><label class="check"><input id="vaMotionOverlays" type="checkbox"> إضافة رموز ومؤثرات متحركة مرتبطة بالمحتوى — اختياري</label><div class="va-actions"><button id="vaRegenerateAudio" class="action secondary">🔊 إعادة توليد الصوت من المحتوى المعدّل</button><button id="vaApprove" class="action">✅ موافقة ودمج الفيديو</button><button id="vaReject" class="action secondary">إعادة إنشاء المواد</button></div>${scenes ? `<details class="va-script"><summary>مراجعة النص والترجمة</summary>${scenes}</details>` : ""}`;
     const renderOrder = () => {
       byId("vaAssetGrid").innerHTML = assets.map((asset,index) => `<div class="va-review-card"><h4>${index+1}. ${asset.type === "video" ? "فيديو" : "صورة"} ${asset.number}</h4>${asset.type === "video" ? `<video controls playsinline preload="metadata" src="/api/visual-alert/preview-video/${encodeURIComponent(jobId)}/${asset.number}"></video>` : `<img src="/api/visual-alert/preview-image/${encodeURIComponent(jobId)}/${asset.number}" alt="معاينة الصورة ${asset.number}">`}<div class="va-order-actions"><button data-move="${index}" data-dir="-1" ${index===0?"disabled":""}>السابق</button><button data-move="${index}" data-dir="1" ${index===assets.length-1?"disabled":""}>التالي</button></div></div>`).join("");
       byId("vaAssetGrid").querySelectorAll("[data-move]").forEach((button) => button.onclick = () => { const from=Number(button.dataset.move),to=from+Number(button.dataset.dir); [assets[from],assets[to]]=[assets[to],assets[from]]; renderOrder(); });
     };
     renderOrder();
+    byId("vaRegenerateAudio").onclick = async () => {
+      const error = validate(); if (error) return byId("vaStatus").textContent = error;
+      byId("vaRegenerateAudio").disabled = true; byId("vaApprove").disabled = true; byId("vaReject").disabled = true;
+      try {
+        const response = await fetch(`/api/visual-alert/regenerate-audio/${encodeURIComponent(jobId)}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),visual_style:byId("vaVisualStyle").value,video_count:Number(byId("vaVideoCount").value)})});
+        const data = await responseData(response); if (!response.ok) throw new Error(data.detail || "تعذر بدء إعادة توليد الصوت");
+        updateProgress(35, "جاري إعادة إنشاء النص والتعليق الصوتي..."); poll(jobId);
+      } catch (err) { fail(err.message); }
+    };
     byId("vaApprove").onclick = async () => {
       byId("vaApprove").disabled = true; byId("vaReject").disabled = true;
       try {
