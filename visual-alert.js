@@ -59,7 +59,8 @@
         <div id="vaStatus" class="status"></div>
         <div id="vaProgressWrap" class="va-progress-wrap hidden"><div class="va-progress"><span id="vaProgressBar"></span></div><div id="vaSteps" class="va-steps"></div></div>
       </div>
-      <div id="vaResult" class="va-result"></div>`;
+      <div id="vaResult" class="va-result"></div>
+      <details class="va-saved"><summary>محفوظات الفيديو</summary><button id="vaLoadArchives" class="action secondary">تحديث المحفوظات</button><div id="vaSavedList" class="va-saved-list"></div></details>`;
     wrap.appendChild(section);
 
     const style = document.createElement("style");
@@ -71,6 +72,7 @@
       .va-result{max-width:820px;margin:20px auto}.va-player{display:block;width:min(100%,390px);aspect-ratio:9/16;margin:0 auto;background:#02070c;border:1px solid #1bd3cf55;border-radius:18px}
       .va-review-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.va-review-card{padding:10px;background:#071421;border:1px solid #294760;border-radius:14px}.va-review-card h4{margin:0 0 8px}.va-review-card img,.va-review-card video{display:block;width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:10px;background:#02070c}.va-order-actions{display:flex;gap:6px;margin-top:8px}.va-order-actions button{flex:1;border:1px solid #294760;border-radius:8px;padding:7px;background:#10283a;color:#fff;cursor:pointer}.va-audio{width:100%;margin:10px 0 4px}.va-review-note{padding:12px;border-radius:12px;background:#10283a;color:#c8f8f5;text-align:center}
       .va-actions{display:flex;justify-content:center;gap:9px;flex-wrap:wrap;margin-top:14px}.va-actions a{text-decoration:none}.va-script{margin-top:18px;padding:14px;border:1px solid #294760;border-radius:13px;background:#081827}
+      .va-saved{max-width:820px;margin:18px auto;padding:14px;border:1px solid #294760;border-radius:14px;background:#081827}.va-saved summary{cursor:pointer;font-weight:800;color:#77f2ee;margin-bottom:12px}.va-saved-list{display:grid;gap:10px;margin-top:12px}.va-saved-item{padding:12px;border:1px solid #294760;border-radius:12px;background:#071421}.va-saved-item h4{margin:0 0 5px}.va-saved-item p{margin:4px 0;color:#9eb2c9}.va-saved-item a{color:#77f2ee;margin-left:10px}
       .va-scene{padding:10px 0;border-bottom:1px solid #1b3147}.va-scene:last-child{border-bottom:0}.va-scene b{color:#77f2ee}.va-scene p{margin:5px 0;color:#c6d5e5}
       @media(max-width:640px){.va-section{padding:14px}.va-generate{width:100%}.va-review-grid{grid-template-columns:1fr 1fr}}
     `;
@@ -82,6 +84,7 @@
     byId("vaAnalyzeIdea").onclick = analyzeIdea;
     byId("vaCreateSocial").onclick = createSocialCopy;
     byId("vaCopySocial").onclick = copySocialCopy;
+    byId("vaLoadArchives").onclick = loadVisualArchives;
     if (location.hash === "#visual-alert-editor") tab.click();
   }
 
@@ -134,6 +137,16 @@
     const text = byId("vaSocialCopy").value.trim(); if (!text) return byId("vaSocialStatus").textContent = "أنشئ المحتوى أولًا أو اكتب النص في الخانة.";
     try { await navigator.clipboard.writeText(text); byId("vaSocialStatus").textContent = "تم نسخ المحتوى المنسق."; }
     catch { byId("vaSocialCopy").select(); document.execCommand("copy"); byId("vaSocialStatus").textContent = "تم نسخ المحتوى المنسق."; }
+  }
+
+  async function loadVisualArchives() {
+    const list = byId("vaSavedList"); list.innerHTML = '<div class="status">جاري تحميل المحفوظات...</div>';
+    try {
+      const response = await fetch("/api/visual-alert/archives");
+      const items = await responseData(response); if (!response.ok) throw new Error(items.detail || "تعذر تحميل المحفوظات");
+      list.innerHTML = items.length ? items.map((item) => `<article class="va-saved-item"><h4>${esc(item.title)}</h4><p>${esc(new Date(item.created_at).toLocaleString("ar-AE"))}</p><div>${item.drive_video_url?`<a href="${esc(item.drive_video_url)}" target="_blank" rel="noopener">فتح الفيديو في Drive</a>`:""}${item.drive_text_url?`<a href="${esc(item.drive_text_url)}" target="_blank" rel="noopener">فتح النص في Drive</a>`:""}<button class="copy-btn" data-copy-saved="${esc(item.id)}">نسخ النص</button></div><textarea class="hidden" data-saved-text="${esc(item.id)}">${esc(item.formatted_content)}</textarea></article>`).join("") : '<div class="status">لا توجد فيديوهات محفوظة.</div>';
+      list.querySelectorAll("[data-copy-saved]").forEach((button) => button.onclick = async () => { const text=list.querySelector(`[data-saved-text="${button.dataset.copySaved}"]`).value; await navigator.clipboard.writeText(text); button.textContent="تم النسخ"; });
+    } catch (err) { list.innerHTML = `<div class="status">خطأ: ${esc(err.message)}</div>`; }
   }
 
   async function generate() {
@@ -208,7 +221,16 @@
     byId("vaGenerate").disabled = false;
     const url = `/api/visual-alert/video/${encodeURIComponent(jobId)}`;
     const scenes = (script.scenes || []).map((scene) => `<div class="va-scene"><b>${esc(scene.onScreenText)}</b><p>${esc(scene.voiceText)}</p></div>`).join("");
-    byId("vaResult").innerHTML = `<video class="va-player" controls playsinline preload="metadata" src="${url}"></video><div class="va-actions"><a class="action" href="${url}" download>تحميل MP4</a><button id="vaAgain" class="action secondary">إعادة إنشاء الفيديو</button><button id="vaEdit" class="action secondary">تعديل المحتوى</button></div>${scenes ? `<details class="va-script"><summary>معاينة السيناريو والمشاهد</summary>${scenes}</details>` : ""}`;
+    byId("vaResult").innerHTML = `<video class="va-player" controls playsinline preload="metadata" src="${url}"></video><div class="va-actions"><a class="action" href="${url}" download>تحميل MP4</a><button id="vaSaveDrive" class="action">☁️ حفظ الفيديو والنص</button><button id="vaAgain" class="action secondary">إعادة إنشاء الفيديو</button><button id="vaEdit" class="action secondary">تعديل المحتوى</button></div><div id="vaSaveStatus" class="status"></div>${scenes ? `<details class="va-script"><summary>معاينة السيناريو والمشاهد</summary>${scenes}</details>` : ""}`;
+    byId("vaSaveDrive").onclick = async () => {
+      const button=byId("vaSaveDrive"); button.disabled=true; byId("vaSaveStatus").textContent="جاري رفع الفيديو إلى Google Drive وحفظ النص في الموقع...";
+      const formatted=byId("vaSocialCopy").value.trim();
+      try {
+        const response=await fetch(`/api/visual-alert/save/${encodeURIComponent(jobId)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),formatted_content:formatted})});
+        const data=await responseData(response); if(!response.ok)throw new Error(data.detail||"تعذر الحفظ");
+        if(data.saved_to_drive){byId("vaSaveStatus").innerHTML=`تم حفظ النص في الموقع والفيديو في Google Drive. <a href="${esc(data.drive_video_url)}" target="_blank" rel="noopener">فتح الفيديو</a>`;button.textContent="✓ تم الحفظ";}else{byId("vaSaveStatus").textContent=data.warning||"تم حفظ النص في الموقع، وتعذر رفع الفيديو إلى Google Drive.";button.textContent="إعادة محاولة Drive";button.disabled=false;} loadVisualArchives();
+      } catch(err){button.disabled=false;byId("vaSaveStatus").textContent=`خطأ: ${err.message}`;}
+    };
     byId("vaAgain").onclick = generate;
     byId("vaEdit").onclick = () => { byId("vaTitle").focus(); window.scrollTo({top:sectionTop(), behavior:"smooth"}); };
   }
