@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.42.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.43.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -211,7 +211,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.42.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.43.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -219,7 +219,7 @@ def health():
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"editable-audio-conclusion-technical-scenes-v20", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"formatted-social-copy-v21", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -252,6 +252,38 @@ USER IDEA:
         return {"title":title, "content":content, "required_action":required_action, "visual_style":style if style in allowed_styles else "Cinematic AI"}
     except Exception as exc:
         raise HTTPException(500, f"تعذر تحليل الفكرة: {str(exc)[:700]}")
+
+@app.post("/api/visual-alert/social-copy")
+def create_visual_alert_social_copy(req: VisualAlertRequest):
+    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
+    prompt = f'''You format Arabic cybersecurity content for LinkedIn and Instagram.
+Use ONLY the supplied title, content and required actions. Never invent statistics, dates, standards, CVEs, vendors, incidents, claims, recommendations or facts.
+Create one polished plain-text Arabic post ready to paste, following this exact visual rhythm:
+1. First line: one relevant emoji followed by the factual title.
+2. One or two short explanatory paragraphs with intentional line breaks.
+3. A short section label appropriate to the content, followed by each supplied action on its own line. Use number-keycap emojis 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ in the original action order.
+4. If the supplied content contains distinct supported focus areas or facts, add a short section label and 3-6 lines, each beginning with one relevant emoji such as 🔐 ⚠️ 🔍 🛡️ 📱 💻 📧 🔄. Omit this section if the source does not support it.
+5. End with a concise conclusion. If the content already contains "الخلاصة:", preserve its meaning without duplicating it.
+6. Add 8-12 concise relevant Arabic and English hashtags on the final lines. Always include #نبض_سيبراني and #الأمن_السيبراني.
+Keep paragraphs short and mobile-friendly. Use no Markdown headings, asterisks, bullet characters, tables or fabricated citations. Preserve English technical terms where useful.
+Return ONLY valid JSON: {{"social_copy":"..."}}
+
+TITLE:
+{req.title}
+
+CONTENT:
+{req.content}
+
+REQUIRED ACTIONS:
+{req.required_action}'''
+    try:
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        data = extract_json(client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text)
+        social_copy = str(data.get("social_copy", "")).strip()
+        if len(social_copy) < 20: raise ValueError("لم يُرجع OpenAI محتوى منسقًا")
+        return {"social_copy":social_copy[:12000]}
+    except Exception as exc:
+        raise HTTPException(500, f"تعذر إنشاء محتوى مواقع التواصل: {str(exc)[:700]}")
 
 def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
