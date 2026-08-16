@@ -45,6 +45,13 @@
         <select id="vaVisualStyle"><option value="Cinematic AI">Cinematic AI — سينمائي واقعي</option><option value="Auto">تلقائي حسب المحتوى</option><option value="SOC Operations">مركز عمليات SOC</option><option value="Executive GRC">مؤسسي وGRC</option><option value="Cyber Awareness">توعية سيبرانية</option></select>
         <label>توزيع المواد البصرية</label>
         <select id="vaVideoCount"><option value="1">فيديو واحد + 5 صور</option><option value="3">3 فيديوهات + 3 صور</option><option value="0">6 صور فقط — بدون توليد فيديو</option></select>
+        <div class="va-social-box">
+          <div class="section-title"><h3>محتوى مواقع التواصل</h3><span class="counter">LinkedIn / Instagram</span></div>
+          <button id="vaCreateSocial" class="action secondary">✨ إنشاء المحتوى المنسق</button>
+          <textarea id="vaSocialCopy" rows="12" placeholder="سيظهر هنا منشور منسق قابل للتعديل: عنوان، فقرات، إجراءات بالأيقونات، خاتمة وهاشتاقات"></textarea>
+          <button id="vaCopySocial" class="action secondary">📋 نسخ المحتوى</button>
+          <div id="vaSocialStatus" class="status"></div>
+        </div>
         <button id="vaGenerate" class="action va-generate">🎬 إنشاء مواد المعاينة</button>
         <div id="vaStatus" class="status"></div>
         <div id="vaProgressWrap" class="va-progress-wrap hidden"><div class="va-progress"><span id="vaProgressBar"></span></div><div id="vaSteps" class="va-steps"></div></div>
@@ -55,7 +62,7 @@
     const style = document.createElement("style");
     style.textContent = `
       .va-section{max-width:1050px;margin:0 auto}.va-title h2{margin:0}.va-title p{margin:5px 0;color:#9eb2c9}
-      .va-form{max-width:820px;margin:18px auto}.va-form textarea{line-height:1.8}.va-analyze{display:block;margin:10px 0 4px}.va-generate{display:block;min-width:220px;margin:18px auto 0}
+      .va-form{max-width:820px;margin:18px auto}.va-form textarea{line-height:1.8}.va-analyze{display:block;margin:10px 0 4px}.va-social-box{margin-top:18px;padding:14px;border:1px solid #294760;border-radius:14px;background:#081827}.va-social-box h3{margin:0}.va-social-box textarea{margin:10px 0}.va-generate{display:block;min-width:220px;margin:18px auto 0}
       .va-progress-wrap{max-width:820px;margin:18px auto}.va-progress{height:12px;background:#06101d;border:1px solid #294760;border-radius:20px;overflow:hidden}
       .va-progress span{display:block;width:0;height:100%;background:linear-gradient(90deg,#0a84ff,#1bd3cf);transition:width .45s ease}.va-steps{text-align:center;color:#77f2ee;margin-top:9px}
       .va-result{max-width:820px;margin:20px auto}.va-player{display:block;width:min(100%,390px);aspect-ratio:9/16;margin:0 auto;background:#02070c;border:1px solid #1bd3cf55;border-radius:18px}
@@ -70,6 +77,8 @@
     document.querySelectorAll('.tab:not([data-view="visual-alert-editor"])').forEach((button) => button.addEventListener("click", () => section.classList.add("hidden")));
     byId("vaGenerate").onclick = generate;
     byId("vaAnalyzeIdea").onclick = analyzeIdea;
+    byId("vaCreateSocial").onclick = createSocialCopy;
+    byId("vaCopySocial").onclick = copySocialCopy;
     if (location.hash === "#visual-alert-editor") tab.click();
   }
 
@@ -103,6 +112,25 @@
       byId("vaIdeaStatus").textContent = "تمت تعبئة الحقول. راجعها وعدّلها، ثم اضغط «إنشاء مواد المعاينة» عند الموافقة.";
     } catch (err) { byId("vaIdeaStatus").textContent = `خطأ: ${err.message}`; }
     finally { button.disabled = false; }
+  }
+
+  async function createSocialCopy() {
+    const error = validate(); if (error) return byId("vaSocialStatus").textContent = error;
+    const button = byId("vaCreateSocial"); button.disabled = true;
+    byId("vaSocialStatus").textContent = "جاري تنسيق المحتوى لمواقع التواصل...";
+    try {
+      const response = await fetch("/api/visual-alert/social-copy", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:byId("vaTitle").value.trim(),content:byId("vaContent").value.trim(),required_action:byId("vaAction").value.trim(),visual_style:byId("vaVisualStyle").value,video_count:Number(byId("vaVideoCount").value)})});
+      const data = await responseData(response); if (!response.ok) throw new Error(data.detail || "تعذر إنشاء المحتوى المنسق");
+      byId("vaSocialCopy").value = data.social_copy || "";
+      byId("vaSocialStatus").textContent = "تم إنشاء المحتوى. يمكنك تعديله ثم نسخه.";
+    } catch (err) { byId("vaSocialStatus").textContent = `خطأ: ${err.message}`; }
+    finally { button.disabled = false; }
+  }
+
+  async function copySocialCopy() {
+    const text = byId("vaSocialCopy").value.trim(); if (!text) return byId("vaSocialStatus").textContent = "أنشئ المحتوى أولًا أو اكتب النص في الخانة.";
+    try { await navigator.clipboard.writeText(text); byId("vaSocialStatus").textContent = "تم نسخ المحتوى المنسق."; }
+    catch { byId("vaSocialCopy").select(); document.execCommand("copy"); byId("vaSocialStatus").textContent = "تم نسخ المحتوى المنسق."; }
   }
 
   async function generate() {
