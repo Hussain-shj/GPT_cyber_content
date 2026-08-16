@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.44.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.45.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -92,6 +92,12 @@ class VisualApprovalRequest(BaseModel):
     asset_order: list[str] = Field(default_factory=list, max_length=6)
     motion_overlays: bool = False
 
+class VisualSaveRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=500)
+    content: str = Field(min_length=10, max_length=12000)
+    required_action: str = Field(min_length=3, max_length=4000)
+    formatted_content: str = Field(default="", max_length=16000)
+
 class ArchivePost(BaseModel):
     id: str | None = None
     topic_id: int | None = None
@@ -150,6 +156,8 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_topic_id ON posts(topic_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)")
         conn.execute("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,is_active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE TABLE IF NOT EXISTS visual_alert_archives(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,required_action TEXT NOT NULL,formatted_content TEXT NOT NULL DEFAULT '',drive_video_id TEXT,drive_video_url TEXT,drive_text_id TEXT,drive_text_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_visual_alert_archives_created_at ON visual_alert_archives(created_at DESC)")
         conn.commit()
 
 def bootstrap_user():
@@ -212,15 +220,15 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.44.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.45.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
-        "database_connected":bool(database_url()), "active_users":user_count(), "news_parser":"source-date-verified-v4",
+        "database_connected":bool(database_url()), "active_users":user_count(), "google_drive_configured":all(os.getenv(key) for key in ("GOOGLE_DRIVE_CLIENT_ID","GOOGLE_DRIVE_CLIENT_SECRET","GOOGLE_DRIVE_REFRESH_TOKEN")), "news_parser":"source-date-verified-v4",
         "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"selectable-threat-editorial-styles-v22", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+        "visual_alert_editor":"google-drive-video-archive-v23", "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
 
@@ -718,6 +726,58 @@ def visual_alert_video(job_id: str):
     path = Path(job["work_dir"]) / "visual-alert.mp4"
     if not path.exists(): raise HTTPException(404, "انتهت صلاحية ملف الفيديو")
     return FileResponse(path, media_type="video/mp4", filename=f"cyberpulse-alert-{job_id[:8]}.mp4")
+
+def _google_drive_access_token() -> str:
+    required = {key:os.getenv(key, "").strip() for key in ("GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET", "GOOGLE_DRIVE_REFRESH_TOKEN")}
+    missing = [key for key, value in required.items() if not value]
+    if missing: raise ValueError("إعداد Google Drive غير مكتمل: " + ", ".join(missing))
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post("https://oauth2.googleapis.com/token", data={"client_id":required["GOOGLE_DRIVE_CLIENT_ID"], "client_secret":required["GOOGLE_DRIVE_CLIENT_SECRET"], "refresh_token":required["GOOGLE_DRIVE_REFRESH_TOKEN"], "grant_type":"refresh_token"})
+        if not response.is_success: raise ValueError(f"تعذر تفويض Google Drive (HTTP {response.status_code}): {response.text[:500]}")
+        token = str(response.json().get("access_token", ""))
+        if not token: raise ValueError("لم يُرجع Google رمز وصول صالحًا")
+        return token
+
+def _google_drive_upload(name: str, mime_type: str, payload: bytes, access_token: str) -> dict[str, str]:
+    metadata: dict[str, Any] = {"name":name}
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+    if folder_id: metadata["parents"] = [folder_id]
+    headers = {"Authorization":f"Bearer {access_token}", "Content-Type":"application/json; charset=UTF-8", "X-Upload-Content-Type":mime_type, "X-Upload-Content-Length":str(len(payload))}
+    with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0), follow_redirects=False) as client:
+        start = client.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,webViewLink", headers=headers, json=metadata)
+        if not start.is_success or not start.headers.get("Location"): raise ValueError(f"تعذر بدء رفع {name} إلى Google Drive (HTTP {start.status_code}): {start.text[:500]}")
+        uploaded = client.put(start.headers["Location"], headers={"Content-Type":mime_type, "Content-Length":str(len(payload))}, content=payload)
+        if not uploaded.is_success: raise ValueError(f"تعذر رفع {name} إلى Google Drive (HTTP {uploaded.status_code}): {uploaded.text[:500]}")
+        data = uploaded.json()
+        return {"id":str(data.get("id", "")), "url":str(data.get("webViewLink", "")), "name":str(data.get("name", name))}
+
+@app.get("/api/visual-alert/archives")
+def visual_alert_archives():
+    with db_conn() as c:
+        return c.execute("SELECT id,title,content,required_action,formatted_content,drive_video_url,drive_text_url,created_at FROM visual_alert_archives ORDER BY created_at DESC LIMIT 100").fetchall()
+
+@app.post("/api/visual-alert/save/{job_id}")
+def save_visual_alert(job_id: str, req: VisualSaveRequest):
+    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
+    if not job or job.get("status") != "completed": raise HTTPException(404, "الفيديو غير جاهز أو انتهت صلاحية المهمة")
+    video_path = Path(job["work_dir"]) / "visual-alert.mp4"
+    if not video_path.exists(): raise HTTPException(404, "انتهت صلاحية ملف الفيديو")
+    formatted = req.formatted_content.strip() or f"{req.title}\n\n{req.content}\n\nالإجراء المطلوب:\n{req.required_action}"
+    archive_id = str(job.get("archive_id") or uuid.uuid4())
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", req.title).strip("-")[:60] or f"cyberpulse-{job_id[:8]}"
+    with db_conn() as c:
+        c.execute("INSERT INTO visual_alert_archives(id,title,content,required_action,formatted_content) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET title=EXCLUDED.title,content=EXCLUDED.content,required_action=EXCLUDED.required_action,formatted_content=EXCLUDED.formatted_content", (archive_id,req.title,req.content,req.required_action,formatted)); c.commit()
+    _visual_job_update(job_id, archive_id=archive_id, saved_to_site=True)
+    try:
+        token = _google_drive_access_token()
+        video = _google_drive_upload(f"{safe_name}.mp4", "video/mp4", video_path.read_bytes(), token)
+        text_file = _google_drive_upload(f"{safe_name}-content.txt", "text/plain; charset=UTF-8", formatted.encode("utf-8"), token)
+        with db_conn() as c:
+            c.execute("UPDATE visual_alert_archives SET drive_video_id=%s,drive_video_url=%s,drive_text_id=%s,drive_text_url=%s WHERE id=%s", (video["id"],video["url"],text_file["id"],text_file["url"],archive_id)); c.commit()
+        _visual_job_update(job_id, saved_to_drive=True, archive_id=archive_id, drive_video_url=video["url"], drive_text_url=text_file["url"])
+        return {"saved":True, "saved_to_site":True, "saved_to_drive":True, "archive_id":archive_id, "drive_video_url":video["url"], "drive_text_url":text_file["url"]}
+    except Exception as exc:
+        return {"saved":True, "saved_to_site":True, "saved_to_drive":False, "archive_id":archive_id, "warning":f"تم حفظ النص في الموقع، لكن تعذر الحفظ في Google Drive: {str(exc)[:800]}"}
 
 def _video_url(output: Any) -> str:
     if isinstance(output, str):
