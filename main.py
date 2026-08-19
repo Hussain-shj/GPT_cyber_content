@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.46.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.47.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -220,12 +220,12 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.46.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.47.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
         "database_connected":bool(database_url()), "active_users":user_count(), "google_drive_configured":all(os.getenv(key) for key in ("GOOGLE_DRIVE_CLIENT_ID","GOOGLE_DRIVE_CLIENT_SECRET","GOOGLE_DRIVE_REFRESH_TOKEN")), "news_parser":"source-date-verified-v4",
-        "news_artwork":"nano-banana-three-choice-v9", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
+        "news_artwork":"two-line-cve-layout-v12", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
         "visual_alert_editor":"fixed-brand-outro-v24", "brand_outro":True, "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
