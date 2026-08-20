@@ -129,9 +129,18 @@ def build_shotstack_payload(req: RenderRequest):
         for t in req.texts:
             offset = {"x": 0, "y": 0.32 if t.position == "top" else (-0.32 if t.position == "bottom" else 0)}
             text_clips.append({
-                "asset": {"type": "text", "text": t.text, "width": 920, "height": 220, "font": {"family": "Open Sans", "color": t.color, "size": t.size, "weight": 700}, "background": {"color": "#000000", "opacity": 0.35, "padding": 18, "borderRadius": 14, "wrap": True}, "alignment": {"horizontal": "center", "vertical": "center"}},
+                "asset": {
+                    "type": "rich-text",
+                    "text": t.text,
+                    "font": {"family": "Open Sans", "color": t.color, "size": t.size, "weight": 700},
+                    "padding": 18,
+                    "background": {"color": "#000000", "opacity": 0.35, "borderRadius": 14, "wrap": True},
+                    "align": {"horizontal": "center", "vertical": "middle"},
+                },
                 "start": t.start,
                 "length": min(t.length, max(total_length - t.start, 0.1)),
+                "width": 920,
+                "height": 220,
                 "position": "center",
                 "offset": offset,
                 "transition": {"in": "fade", "out": "fade"},
