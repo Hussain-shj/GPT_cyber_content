@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111318" />
+  <title>Mobile Video Editor</title>
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header><div><p class="eyebrow">VIDEO EDITOR</p><h1>محرر الفيديو</h1></div><span id="apiStatus" class="status">جاري الفحص…</span></header>
+    <section class="card hero"><h2>1. المقاطع</h2><p>اختر عدة فيديوهات من الهاتف، ثم غيّر ترتيبها بالسحب.</p><label class="upload-btn">إضافة فيديوهات<input id="videoInput" type="file" accept="video/*" multiple hidden /></label><div id="clips" class="clips"></div></section>
+    <section class="card"><h2>2. الصوت</h2><div class="grid2"><label class="upload-btn secondary">صوت من الهاتف<input id="audioInput" type="file" accept="audio/*" hidden /></label><button id="ttsToggle" class="secondary">إنشاء صوت AI</button></div><div id="ttsBox" class="hidden stack"><textarea id="ttsText" placeholder="اكتب النص المراد تحويله إلى صوت…"></textarea><div class="grid2"><label>ثبات الصوت <input id="stability" type="range" min="0" max="1" step="0.05" value="0.45"></label><label>وضوح/تشابه <input id="similarity" type="range" min="0" max="1" step="0.05" value="0.75"></label></div><button id="makeTts">إنشاء الصوت</button></div><div id="audioInfo" class="muted">لا يوجد صوت إضافي</div><label>مستوى الصوت الإضافي <input id="audioVolume" type="range" min="0" max="1" step="0.05" value="0.45"></label></section>
+    <section class="card"><h2>3. النصوص</h2><div class="grid2"><input id="textValue" placeholder="النص" /><select id="textPosition"><option value="bottom">أسفل</option><option value="center">وسط</option><option value="top">أعلى</option></select><input id="textStart" type="number" min="0" step="0.5" value="0" placeholder="البداية" /><input id="textLength" type="number" min="0.5" step="0.5" value="3" placeholder="المدة" /></div><button id="addText">إضافة النص</button><div id="texts" class="list"></div></section>
+    <section class="card"><h2>4. التصدير</h2><div class="grid2"><label>المقاس<select id="aspect"><option value="9:16">9:16 Reels/Story</option><option value="4:5">4:5 Post</option><option value="1:1">1:1 Square</option><option value="16:9">16:9 Landscape</option></select></label><label>الجودة<select id="resolution"><option value="hd">HD</option><option value="1080">1080p</option><option value="sd">SD</option></select></label></div><button id="renderBtn" class="primary">دمج وتصدير الفيديو</button><div id="renderState" class="render-state"></div></section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
