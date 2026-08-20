@@ -69,6 +69,7 @@ def require_env(name: str, value: str):
     if not value:
         raise HTTPException(status_code=503, detail=f"Missing environment variable: {name}")
 
+@app.get("/health")
 @app.get("/api/health")
 def health():
     return {"ok": True, "shotstack": bool(SHOTSTACK_API_KEY), "elevenlabs": bool(ELEVENLABS_API_KEY), "cloudinary": bool(os.getenv("CLOUDINARY_CLOUD_NAME"))}
