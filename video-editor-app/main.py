@@ -1,3 +1,4 @@
+import html
 import os
 import tempfile
 import time
@@ -26,6 +27,8 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 CLOUDINARY_FOLDER = os.getenv("CLOUDINARY_FOLDER", "mobile-video-editor")
+CAIRO_FONT_URL = "https://shotstack-assets.s3-ap-southeast-2.amazonaws.com/fonts/Cairo-Regular.ttf"
+
 
 class TTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
@@ -33,6 +36,7 @@ class TTSRequest(BaseModel):
     stability: float = Field(default=0.45, ge=0, le=1)
     similarity_boost: float = Field(default=0.75, ge=0, le=1)
     style: float = Field(default=0.2, ge=0, le=1)
+
 
 class VideoClip(BaseModel):
     src: str
@@ -44,10 +48,12 @@ class VideoClip(BaseModel):
     effect: Literal["none", "zoomIn", "zoomOut", "slideLeft", "slideRight", "slideUp", "slideDown"] = "none"
     transition: Literal["none", "fade", "wipeLeft", "wipeRight", "slideLeft", "slideRight", "slideUp", "slideDown"] = "fade"
 
+
 class AudioTrack(BaseModel):
     src: str
     volume: float = Field(default=0.45, ge=0, le=1)
     effect: Literal["none", "fadeIn", "fadeOut", "fadeInFadeOut"] = "fadeInFadeOut"
+
 
 class TextOverlay(BaseModel):
     text: str = Field(min_length=1, max_length=500)
@@ -57,6 +63,7 @@ class TextOverlay(BaseModel):
     size: int = Field(default=42, ge=14, le=160)
     color: str = "#ffffff"
 
+
 class RenderRequest(BaseModel):
     clips: list[VideoClip] = Field(min_length=1, max_length=50)
     audio: AudioTrack | None = None
@@ -65,14 +72,22 @@ class RenderRequest(BaseModel):
     resolution: Literal["sd", "hd", "1080"] = "hd"
     fps: Literal[24, 25, 30, 50, 60] = 30
 
+
 def require_env(name: str, value: str):
     if not value:
         raise HTTPException(status_code=503, detail=f"Missing environment variable: {name}")
 
+
 @app.get("/health")
 @app.get("/api/health")
 def health():
-    return {"ok": True, "shotstack": bool(SHOTSTACK_API_KEY), "elevenlabs": bool(ELEVENLABS_API_KEY), "cloudinary": bool(os.getenv("CLOUDINARY_CLOUD_NAME"))}
+    return {
+        "ok": True,
+        "shotstack": bool(SHOTSTACK_API_KEY),
+        "elevenlabs": bool(ELEVENLABS_API_KEY),
+        "cloudinary": bool(os.getenv("CLOUDINARY_CLOUD_NAME")),
+    }
+
 
 @app.get("/api/cloudinary-signature")
 def cloudinary_signature():
@@ -85,7 +100,14 @@ def cloudinary_signature():
     timestamp = int(time.time())
     params = {"timestamp": timestamp, "folder": CLOUDINARY_FOLDER}
     signature = cloudinary.utils.api_sign_request(params, api_secret)
-    return {"cloud_name": cloud_name, "api_key": api_key, "timestamp": timestamp, "folder": CLOUDINARY_FOLDER, "signature": signature}
+    return {
+        "cloud_name": cloud_name,
+        "api_key": api_key,
+        "timestamp": timestamp,
+        "folder": CLOUDINARY_FOLDER,
+        "signature": signature,
+    }
+
 
 @app.post("/api/tts")
 async def create_tts(req: TTSRequest):
@@ -93,8 +115,21 @@ async def create_tts(req: TTSRequest):
     require_env("CLOUDINARY_CLOUD_NAME", os.getenv("CLOUDINARY_CLOUD_NAME", ""))
     voice_id = req.voice_id or ELEVENLABS_VOICE_ID
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    payload = {"text": req.text, "model_id": ELEVENLABS_MODEL_ID, "voice_settings": {"stability": req.stability, "similarity_boost": req.similarity_boost, "style": req.style, "use_speaker_boost": True}}
-    headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json", "Accept": "audio/mpeg"}
+    payload = {
+        "text": req.text,
+        "model_id": ELEVENLABS_MODEL_ID,
+        "voice_settings": {
+            "stability": req.stability,
+            "similarity_boost": req.similarity_boost,
+            "style": req.style,
+            "use_speaker_boost": True,
+        },
+    }
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+    }
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(url, json=payload, headers=headers)
     if response.status_code >= 400:
@@ -102,54 +137,132 @@ async def create_tts(req: TTSRequest):
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
         tmp.write(response.content)
         tmp.flush()
-        uploaded = cloudinary.uploader.upload(tmp.name, resource_type="video", folder=CLOUDINARY_FOLDER, format="mp3")
+        uploaded = cloudinary.uploader.upload(
+            tmp.name,
+            resource_type="video",
+            folder=CLOUDINARY_FOLDER,
+            format="mp3",
+        )
     return {"url": uploaded["secure_url"], "public_id": uploaded.get("public_id")}
+
+
+def contains_arabic(value: str) -> bool:
+    return any(
+        "\u0600" <= ch <= "\u06ff"
+        or "\u0750" <= ch <= "\u077f"
+        or "\u08a0" <= ch <= "\u08ff"
+        or "\ufb50" <= ch <= "\ufdff"
+        or "\ufe70" <= ch <= "\ufeff"
+        for ch in value
+    )
+
+
+def build_html_text_asset(t: TextOverlay) -> dict:
+    direction = "rtl" if contains_arabic(t.text) else "ltr"
+    safe_text = html.escape(t.text).replace("\n", "<br>")
+    return {
+        "type": "html",
+        "html": f"<p dir='{direction}'>{safe_text}</p>",
+        "css": (
+            "p { "
+            "margin: 0; padding: 12px 18px; "
+            "font-family: 'Cairo'; "
+            f"font-size: {t.size}px; color: {t.color}; "
+            f"direction: {direction}; text-align: center; "
+            "line-height: 1.45; background-color: #000000; "
+            "}"
+        ),
+        "width": 920,
+        "height": 220,
+    }
+
 
 def build_shotstack_payload(req: RenderRequest):
     cursor = 0.0
     video_clips = []
     total_length = 0.0
+
     for clip in req.clips:
         play_length = round(clip.length / clip.speed, 3)
         item = {
-            "asset": {"type": "video", "src": clip.src, "trim": clip.trim, "volume": clip.volume, "speed": clip.speed, "transcode": True},
+            "asset": {
+                "type": "video",
+                "src": clip.src,
+                "trim": clip.trim,
+                "volume": clip.volume,
+                "speed": clip.speed,
+                "transcode": True,
+            },
             "start": round(cursor, 3),
             "length": play_length,
             "fit": "cover",
         }
-        if clip.filter != "none": item["filter"] = clip.filter
-        if clip.effect != "none": item["effect"] = clip.effect
-        if clip.transition != "none": item["transition"] = {"in": clip.transition, "out": clip.transition}
+        if clip.filter != "none":
+            item["filter"] = clip.filter
+        if clip.effect != "none":
+            item["effect"] = clip.effect
+        if clip.transition != "none":
+            item["transition"] = {"in": clip.transition, "out": clip.transition}
         video_clips.append(item)
         cursor += play_length
         total_length += play_length
+
     tracks = []
+
     if req.texts:
         text_clips = []
         for t in req.texts:
-            offset = {"x": 0, "y": 0.32 if t.position == "top" else (-0.32 if t.position == "bottom" else 0)}
-            text_clips.append({
-                "asset": {
-                    "type": "rich-text",
-                    "text": t.text,
-                    "font": {"family": "Open Sans", "color": t.color, "size": t.size, "weight": 700},
-                    "padding": 18,
-                    "background": {"color": "#000000", "opacity": 0.35, "borderRadius": 14, "wrap": True},
-                    "align": {"horizontal": "center", "vertical": "middle"},
-                },
-                "start": t.start,
-                "length": min(t.length, max(total_length - t.start, 0.1)),
-                "width": 920,
-                "height": 220,
-                "position": "center",
-                "offset": offset,
-                "transition": {"in": "fade", "out": "fade"},
-            })
+            offset = {
+                "x": 0,
+                "y": 0.32 if t.position == "top" else (-0.32 if t.position == "bottom" else 0),
+            }
+            text_clips.append(
+                {
+                    "asset": build_html_text_asset(t),
+                    "start": t.start,
+                    "length": min(t.length, max(total_length - t.start, 0.1)),
+                    "position": "center",
+                    "offset": offset,
+                    "transition": {"in": "fade", "out": "fade"},
+                }
+            )
         tracks.append({"clips": text_clips})
+
     if req.audio:
-        tracks.append({"clips": [{"asset": {"type": "audio", "src": req.audio.src, "volume": req.audio.volume, "effect": req.audio.effect}, "start": 0, "length": round(total_length, 3)}]})
+        tracks.append(
+            {
+                "clips": [
+                    {
+                        "asset": {
+                            "type": "audio",
+                            "src": req.audio.src,
+                            "volume": req.audio.volume,
+                            "effect": req.audio.effect,
+                        },
+                        "start": 0,
+                        "length": round(total_length, 3),
+                    }
+                ]
+            }
+        )
+
     tracks.append({"clips": video_clips})
-    return {"timeline": {"background": "#000000", "tracks": tracks}, "output": {"format": "mp4", "resolution": req.resolution, "aspectRatio": req.aspect_ratio, "fps": req.fps, "quality": "high"}}
+
+    return {
+        "timeline": {
+            "background": "#000000",
+            "fonts": [{"src": CAIRO_FONT_URL}],
+            "tracks": tracks,
+        },
+        "output": {
+            "format": "mp4",
+            "resolution": req.resolution,
+            "aspectRatio": req.aspect_ratio,
+            "fps": req.fps,
+            "quality": "high",
+        },
+    }
+
 
 @app.post("/api/render")
 async def render(req: RenderRequest):
@@ -163,6 +276,7 @@ async def render(req: RenderRequest):
     body = response.json()
     return {"render_id": body.get("response", {}).get("id"), "raw": body}
 
+
 @app.get("/api/render/{render_id}")
 async def render_status(render_id: str):
     require_env("SHOTSTACK_API_KEY", SHOTSTACK_API_KEY)
@@ -172,9 +286,15 @@ async def render_status(render_id: str):
     if response.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Shotstack error: {response.text[:500]}")
     data = response.json().get("response", {})
-    return {"status": data.get("status"), "url": data.get("url"), "error": data.get("error")}
+    return {
+        "status": data.get("status"),
+        "url": data.get("url"),
+        "error": data.get("error"),
+    }
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 @app.get("/")
 def index():
