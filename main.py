@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.47.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.48.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -220,7 +220,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.47.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.48.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -967,6 +967,13 @@ def archive_list():
 @app.get("/api/archive/used-topic-ids")
 def used_ids():
     with db_conn() as c: return {"topic_ids":[r["topic_id"] for r in c.execute("SELECT DISTINCT topic_id FROM posts WHERE topic_id IS NOT NULL").fetchall()]}
+
+@app.get("/api/archive/{post_id}")
+def archive_get(post_id: str):
+    with db_conn() as c:
+        post = c.execute("SELECT id,topic_id,topic,domain,post_type,platform,content,created_at,updated_at FROM posts WHERE id=%s", (post_id,)).fetchone()
+    if not post: raise HTTPException(404, "المنشور غير موجود")
+    return post
 
 @app.post("/api/archive")
 def archive_save(p: ArchivePost):
