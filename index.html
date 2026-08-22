@@ -20,7 +20,7 @@
 <section id="archive" class="card hidden"><div class="section-title"><h2>أرشيف المنشورات</h2><button id="refreshArchive" class="action secondary">تحديث</button></div><div id="archiveGrid" class="archive-grid"></div></section>
 </div>
 <script>
-const API='';const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const API='';const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[m]));
 const TOPICS=[
 {id:1,title:'ما هو GRC ولماذا أصبح أساس الأمن السيبراني؟',detail:'Governance • Risk • Compliance',domain:'GRC'},{id:2,title:'الفرق بين الأمن السيبراني و GRC',detail:'تكامل الأدوار والمسؤوليات',domain:'GRC'},{id:3,title:'لماذا تفشل برامج ISO 27001 رغم الحصول على الشهادة؟',detail:'الشهادة مقابل التطبيق المستمر',domain:'GRC'},{id:4,title:'NIST CSF 2.0 والتغيير الأكبر: وظيفة Govern',detail:'الحوكمة والإدارة العليا',domain:'GRC'},{id:5,title:'من هو مالك المخاطر الحقيقي داخل المؤسسة؟',detail:'Risk Owners ومسؤولية الأعمال',domain:'GRC'},{id:6,title:'كيف تبني Risk Register بطريقة صحيحة؟',detail:'من التقييم إلى المعالجة',domain:'GRC'},{id:7,title:'Risk Appetite في الجهات الحكومية',detail:'شهية المخاطر وحدود القبول',domain:'GRC'},{id:8,title:'Third-Party Risk Management',detail:'مخاطر الموردين',domain:'GRC'},{id:9,title:'Supply Chain Cybersecurity',detail:'سلسلة التوريد',domain:'Cybersecurity'},{id:10,title:'Continuous Compliance',detail:'الامتثال المستمر',domain:'GRC'},{id:11,title:'AI Governance: لماذا أصبح الذكاء الاصطناعي جزءًا من GRC؟',detail:'حوكمة AI',domain:'AI Governance'},{id:12,title:'ISO/IEC 42001 لإدارة الذكاء الاصطناعي',detail:'AI Management System',domain:'AI Governance'},{id:13,title:'Shadow AI داخل المؤسسات',detail:'استخدام AI دون رقابة',domain:'AI Governance'},{id:14,title:'Board Cyber Governance',detail:'مسؤولية الإدارة العليا',domain:'GRC'},{id:15,title:'KPI vs KRI: ما المؤشرات التي يحتاجها GRC؟',detail:'الأداء والمخاطر',domain:'GRC'},{id:16,title:'كيف تقيس نضج برنامج GRC؟',detail:'Maturity Assessment',domain:'GRC'},{id:17,title:'NIS2 باختصار: ما الذي تغير؟',detail:'التوجيه الأوروبي',domain:'GRC'},{id:18,title:'DORA والمرونة التشغيلية الرقمية',detail:'القطاع المالي',domain:'GRC'},{id:19,title:'Cyber Resilience Act وتأثيره على المنتجات الرقمية',detail:'دورة حياة المنتج',domain:'Cybersecurity'},{id:20,title:'إدارة الاستثناءات الأمنية بطريقة صحيحة',detail:'Security Exceptions',domain:'GRC'},{id:21,title:'Security Awareness أم Security Culture؟',detail:'التدريب مقابل السلوك',domain:'Cybersecurity'},{id:22,title:'لماذا تفشل سياسات الأمن السيبراني؟',detail:'Policy Management',domain:'GRC'},{id:23,title:'Least Privilege ومراجعة الصلاحيات',detail:'حوكمة الوصول',domain:'Cybersecurity'},{id:24,title:'إدارة الثغرات من منظور GRC',detail:'Vulnerability + Risk',domain:'GRC'},{id:25,title:'إدارة الحوادث وعلاقتها بإدارة المخاطر',detail:'Incident + Risk',domain:'GRC'},{id:26,title:'ماذا يبحث المدقق الداخلي في الأمن السيبراني؟',detail:'Audit Evidence',domain:'GRC'},{id:27,title:'Business Continuity وعلاقته بـ GRC',detail:'BCM والمرونة',domain:'GRC'},{id:28,title:'Cyber Metrics التي يجب عرضها للإدارة العليا',detail:'Executive Dashboard',domain:'GRC'},{id:29,title:'أكثر 10 أخطاء شائعة في برامج GRC',detail:'أخطاء عملية',domain:'GRC'},{id:30,title:'مستقبل GRC: AI Governance وAutomation وContinuous Compliance',detail:'اتجاهات حديثة',domain:'GRC'}];
 let selectedTopicId=null,current=null,used=new Set();
@@ -46,6 +46,20 @@ function grcPostText(d){
   if(tags.length)blocks.push(tags.join(' '));
   return blocks.join('\n\n');
 }
+async function copyTextReliable(text){
+  const value=String(text??'');
+  if(!value)throw new Error('لا يوجد محتوى للنسخ.');
+  if(navigator.clipboard&&window.isSecureContext){
+    try{await navigator.clipboard.writeText(value);return true}catch(e){}
+  }
+  const ta=document.createElement('textarea');
+  ta.value=value;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-9999px';ta.style.opacity='0';document.body.appendChild(ta);
+  ta.focus();ta.select();ta.setSelectionRange(0,ta.value.length);
+  const ok=document.execCommand&&document.execCommand('copy');
+  ta.remove();
+  if(!ok)throw new Error('تعذر الوصول إلى الحافظة. اضغط مطولًا على المحتوى وانسخه يدويًا.');
+  return true;
+}
 function renderResult(){
   if(!current)return;
   const d=current.data,r=$('result');r.classList.remove('hidden');
@@ -55,7 +69,7 @@ function renderResult(){
   const tags=(d.hashtags||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join('');
   const src=(d.sources||[]).map(x=>`<div class="source"><a href="${esc(x.url)}" target="_blank">${esc(x.name)}</a> — ${esc(x.why_relevant||'')}</div>`).join('');
   r.innerHTML=`<h2>${esc(d.title)}</h2><h3>Hook</h3><p>${esc(d.hook)}</p><div class="section-title"><h3>الشرائح</h3><span>${d.web_verified?'تم التحقق من مصادر حديثة':'وضع سريع'}</span></div><div class="slides">${slides}</div><div class="section-title"><h3>Caption</h3><button id="copyCaption" class="copy-btn">نسخ منشور لينكدإن</button></div><p>${esc(d.caption)}</p><h3>التوصيات</h3><ul>${rec}</ul><h3>CTA</h3><p>${esc(d.cta)}</p><h3>SEO Keywords</h3>${keys}<h3>Hashtags</h3>${tags}<h3>المصادر</h3>${src||'<p>فعّل «التحقق من مصادر عالمية حديثة» عند الحاجة إلى مصادر حديثة.</p>'}`;
-  $('copyCaption').onclick=()=>navigator.clipboard.writeText(grcPostText(d)).then(()=>$('msg').textContent='تم نسخ منشور لينكدإن منسقًا بالأيقونات.');
+  $('copyCaption').onclick=async()=>{const b=$('copyCaption');const old=b.textContent;b.disabled=true;b.textContent='جاري النسخ...';try{await copyTextReliable(grcPostText(d));$('msg').textContent='تم نسخ منشور لينكدإن بنجاح.';b.textContent='تم النسخ ✓'}catch(e){$('msg').textContent='تعذر النسخ: '+e.message;b.textContent='إعادة المحاولة'}finally{setTimeout(()=>{b.disabled=false;b.textContent=old},1400)}};
   r.querySelectorAll('[data-img]').forEach(b=>b.onclick=()=>generateImage(Number(b.dataset.img),true));
 }
 async function generateImage(i,save=true){if(!current)return;const s=current.data.slides[i],art=$('art-'+i);if(art)art.querySelector('.placeholder')?.replaceWith(Object.assign(document.createElement('div'),{className:'placeholder',textContent:'جاري إنشاء الـArtwork...'}));try{const d=await api('/api/generate-image',{method:'POST',body:JSON.stringify({title:s.headline,body:s.body,slide_number:s.number,post_type:current.postType,domain:current.domain,visual_style:'GRC Professional'})});s.image_b64=d.b64_json;s.image_mime_type=d.mime_type||'image/jpeg';if(save)await saveArchive();renderResult();return true}catch(e){$('msg').textContent='تعذر إنشاء صورة '+s.number+': '+e.message;return false}}
