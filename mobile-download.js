@@ -163,7 +163,7 @@
       if (!a.querySelector("[data-save-image]")) {
         let b = document.createElement("button");
         b.dataset.saveImage = "1";
-        b.textContent = ICONS.save + " حفظ JPEG";
+        b.textContent = ICONS.save + " تحميل الصورة";
         b.onclick = () => saveGrc(i);
         a.appendChild(b);
       }
