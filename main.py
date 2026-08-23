@@ -19,26 +19,28 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlencode
 
 import psycopg
 import httpx
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, RedirectResponse
+from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.48.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.49.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
 MOBILE_JS = BASE_DIR / "mobile-download.js"
 NEWS_SEARCH_JS = BASE_DIR / "news-search.js"
 VISUAL_ALERT_JS = BASE_DIR / "visual-alert.js"
+LINKEDIN_JS = BASE_DIR / "linkedin.js"
 CYBER_SOURCES_FILE = BASE_DIR / "cyber_sources.json"
-AUTH_EXEMPT_PATHS = {"/health"}
+AUTH_EXEMPT_PATHS = {"/health", "/auth/linkedin/callback"}
 
 class ContentRequest(BaseModel):
     topic: str = Field(min_length=3, max_length=300)
@@ -107,6 +109,11 @@ class ArchivePost(BaseModel):
     platform: str = "Both"
     content: dict[str, Any]
 
+class LinkedInPublishRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=3000)
+    image_b64: str = Field(default="", max_length=18_000_000)
+    image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
+
 def database_url(): return os.getenv("DATABASE_URL")
 
 VIDEO_JOBS: dict[str, dict[str, Any]] = {}
@@ -158,6 +165,8 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,is_active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         conn.execute("CREATE TABLE IF NOT EXISTS visual_alert_archives(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,required_action TEXT NOT NULL,formatted_content TEXT NOT NULL DEFAULT '',drive_video_id TEXT,drive_video_url TEXT,drive_text_id TEXT,drive_text_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visual_alert_archives_created_at ON visual_alert_archives(created_at DESC)")
+        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_connections(id TEXT PRIMARY KEY DEFAULT 'personal',member_id TEXT NOT NULL,member_name TEXT NOT NULL DEFAULT '',access_token_encrypted TEXT NOT NULL,expires_at TIMESTAMPTZ,connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_publications(id TEXT PRIMARY KEY,post_urn TEXT NOT NULL,post_url TEXT NOT NULL,has_image BOOLEAN NOT NULL DEFAULT FALSE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         conn.commit()
 
 def bootstrap_user():
@@ -215,12 +224,13 @@ def mobile_js():
     base = MOBILE_JS.read_text(encoding="utf-8") if MOBILE_JS.exists() else ""
     search = NEWS_SEARCH_JS.read_text(encoding="utf-8") if NEWS_SEARCH_JS.exists() else ""
     visual_alert = VISUAL_ALERT_JS.read_text(encoding="utf-8") if VISUAL_ALERT_JS.exists() else ""
-    return Response(content=base + "\n\n" + search + "\n\n" + visual_alert, media_type="application/javascript", headers={"Cache-Control":"no-store, max-age=0"})
+    linkedin = LINKEDIN_JS.read_text(encoding="utf-8") if LINKEDIN_JS.exists() else ""
+    return Response(content=base + "\n\n" + search + "\n\n" + visual_alert + "\n\n" + linkedin, media_type="application/javascript", headers={"Cache-Control":"no-store, max-age=0"})
 
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.48.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.49.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -231,6 +241,107 @@ def health():
         "visual_alert_editor":"fixed-brand-outro-v24", "brand_outro":True, "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
         "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
     }
+
+def _linkedin_config():
+    client_id = os.getenv("LINKEDIN_CLIENT_ID", "").strip()
+    client_secret = os.getenv("LINKEDIN_CLIENT_SECRET", "").strip()
+    redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "").strip()
+    if not all((client_id, client_secret, redirect_uri)):
+        raise HTTPException(503, "أضف LINKEDIN_CLIENT_ID وLINKEDIN_CLIENT_SECRET وLINKEDIN_REDIRECT_URI في Railway")
+    return client_id, client_secret, redirect_uri
+
+def _linkedin_fernet():
+    _, secret, _ = _linkedin_config()
+    key = base64.urlsafe_b64encode(hashlib.sha256(("cyberpulse-linkedin:" + secret).encode()).digest())
+    return Fernet(key)
+
+def _linkedin_token():
+    with db_conn() as c:
+        row = c.execute("SELECT * FROM linkedin_connections WHERE id='personal'").fetchone()
+    if not row: raise HTTPException(409, "حساب LinkedIn غير متصل")
+    if row.get("expires_at") and row["expires_at"] <= datetime.now(timezone.utc):
+        raise HTTPException(401, "انتهت صلاحية ربط LinkedIn. أعد الاتصال بالحساب")
+    try: return _linkedin_fernet().decrypt(row["access_token_encrypted"].encode()).decode(), row
+    except InvalidToken: raise HTTPException(500, "تعذر قراءة اتصال LinkedIn. أعد ربط الحساب")
+
+@app.get("/auth/linkedin/start")
+def linkedin_start():
+    client_id, secret, redirect_uri = _linkedin_config()
+    issued = str(int(time.time()))
+    nonce = secrets.token_urlsafe(18)
+    payload = issued + "." + nonce
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    state = base64.urlsafe_b64encode((payload + "." + signature).encode()).decode().rstrip("=")
+    query = urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"state":state,"scope":"openid profile w_member_social"})
+    return RedirectResponse("https://www.linkedin.com/oauth/v2/authorization?" + query)
+
+@app.get("/auth/linkedin/callback")
+def linkedin_callback(code: str = "", state: str = "", error: str = ""):
+    if error: return RedirectResponse("/#linkedin?linkedin=denied")
+    client_id, secret, redirect_uri = _linkedin_config()
+    try:
+        decoded = base64.urlsafe_b64decode(state + "=" * (-len(state) % 4)).decode()
+        issued, nonce, signature = decoded.split(".", 2)
+        expected = hmac.new(secret.encode(), f"{issued}.{nonce}".encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected) or abs(int(time.time()) - int(issued)) > 900: raise ValueError()
+    except Exception: raise HTTPException(400, "حالة OAuth غير صالحة أو منتهية")
+    if not code: raise HTTPException(400, "لم يُرجع LinkedIn رمز التفويض")
+    with httpx.Client(timeout=40) as client:
+        token_response = client.post("https://www.linkedin.com/oauth/v2/accessToken", data={"grant_type":"authorization_code","code":code,"redirect_uri":redirect_uri,"client_id":client_id,"client_secret":secret})
+        if token_response.status_code >= 400: raise HTTPException(502, f"تعذر الحصول على رمز LinkedIn: {token_response.text[:500]}")
+        token_data = token_response.json(); token = token_data.get("access_token", "")
+        profile_response = client.get("https://api.linkedin.com/v2/userinfo", headers={"Authorization":f"Bearer {token}"})
+        if profile_response.status_code >= 400: raise HTTPException(502, f"تعذر قراءة حساب LinkedIn: {profile_response.text[:500]}")
+        profile = profile_response.json()
+    member_id = str(profile.get("sub", "")).strip()
+    if not token or not member_id: raise HTTPException(502, "لم يُرجع LinkedIn بيانات الحساب كاملة")
+    expires_at = datetime.fromtimestamp(time.time() + int(token_data.get("expires_in", 5184000)), timezone.utc)
+    encrypted = _linkedin_fernet().encrypt(token.encode()).decode()
+    name = str(profile.get("name") or "حساب LinkedIn")[:300]
+    with db_conn() as c:
+        c.execute("INSERT INTO linkedin_connections(id,member_id,member_name,access_token_encrypted,expires_at) VALUES('personal',%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET member_id=EXCLUDED.member_id,member_name=EXCLUDED.member_name,access_token_encrypted=EXCLUDED.access_token_encrypted,expires_at=EXCLUDED.expires_at,updated_at=NOW()", (member_id,name,encrypted,expires_at)); c.commit()
+    return RedirectResponse("/#linkedin?linkedin=connected")
+
+@app.get("/api/linkedin/status")
+def linkedin_status():
+    configured = all(os.getenv(k) for k in ("LINKEDIN_CLIENT_ID","LINKEDIN_CLIENT_SECRET","LINKEDIN_REDIRECT_URI"))
+    if not configured: return {"configured":False,"connected":False}
+    with db_conn() as c: row = c.execute("SELECT member_name,expires_at,connected_at FROM linkedin_connections WHERE id='personal'").fetchone()
+    connected = bool(row and (not row["expires_at"] or row["expires_at"] > datetime.now(timezone.utc)))
+    return {"configured":True,"connected":connected,"member_name":row["member_name"] if row else "","expires_at":row["expires_at"] if row else None}
+
+@app.post("/api/linkedin/disconnect")
+def linkedin_disconnect():
+    with db_conn() as c: c.execute("DELETE FROM linkedin_connections WHERE id='personal'"); c.commit()
+    return {"disconnected":True}
+
+@app.post("/api/linkedin/publish")
+def linkedin_publish(req: LinkedInPublishRequest):
+    token, connection = _linkedin_token()
+    author = "urn:li:person:" + connection["member_id"]
+    headers = {"Authorization":f"Bearer {token}","Linkedin-Version":os.getenv("LINKEDIN_API_VERSION", "202608"),"X-Restli-Protocol-Version":"2.0.0","Content-Type":"application/json"}
+    content = None
+    with httpx.Client(timeout=120) as client:
+        if req.image_b64:
+            try: image_bytes = base64.b64decode(req.image_b64, validate=True)
+            except Exception: raise HTTPException(400, "بيانات الصورة غير صالحة")
+            if len(image_bytes) > 10 * 1024 * 1024: raise HTTPException(413, "حجم الصورة يتجاوز 10 MB")
+            init = client.post("https://api.linkedin.com/rest/images?action=initializeUpload", headers=headers, json={"initializeUploadRequest":{"owner":author}})
+            if init.status_code >= 400: raise HTTPException(init.status_code, f"تعذر تهيئة صورة LinkedIn: {init.text[:700]}")
+            value = init.json().get("value", {}); upload_url = value.get("uploadUrl"); image_urn = value.get("image")
+            if not upload_url or not image_urn: raise HTTPException(502, "لم يُرجع LinkedIn رابط رفع الصورة")
+            upload = client.put(upload_url, content=image_bytes, headers={"Content-Type":req.image_mime_type})
+            if upload.status_code >= 400: raise HTTPException(upload.status_code, f"تعذر رفع صورة LinkedIn: {upload.text[:500]}")
+            content = {"media":{"title":"نبض سيبراني | CYBER PULSE","id":image_urn}}
+        body = {"author":author,"commentary":req.text,"visibility":"PUBLIC","distribution":{"feedDistribution":"MAIN_FEED","targetEntities":[],"thirdPartyDistributionChannels":[]},"lifecycleState":"PUBLISHED","isReshareDisabledByAuthor":False}
+        if content: body["content"] = content
+        response = client.post("https://api.linkedin.com/rest/posts", headers=headers, json=body)
+    if response.status_code >= 400: raise HTTPException(response.status_code, f"فشل النشر على LinkedIn: {response.text[:900]}")
+    post_urn = response.headers.get("x-restli-id", "")
+    post_url = "https://www.linkedin.com/feed/update/" + post_urn + "/" if post_urn else "https://www.linkedin.com/feed/"
+    with db_conn() as c:
+        c.execute("INSERT INTO linkedin_publications(id,post_urn,post_url,has_image) VALUES(%s,%s,%s,%s)", (str(uuid.uuid4()),post_urn,post_url,bool(content))); c.commit()
+    return {"published":True,"post_urn":post_urn,"post_url":post_url}
 
 def _visual_job_update(job_id: str, **values):
     with VISUAL_ALERT_JOBS_LOCK:

@@ -418,6 +418,20 @@ s.innerHTML = `<div class="section-title"><div><h2 style="margin:0">الأخبا
       `<div class="news-stage"><img class="hero" src="data:${esc(artMime)};base64,${art}"><div class="news-overlay"></div><img class="news-logo" src="${DARK}"><div class="news-content"><div class="news-head">${esc(parsed.headline)}</div>${badges ? `<div class="news-badges">${badges}</div>` : ""}${parsed.source ? `<div class="news-source">المصدر: <span style="color:#00D1C7">${esc(parsed.source)}</span></div>` : ""}</div></div>`;
     q("newsSave").classList.remove("hidden");
     q("newsShare").classList.remove("hidden");
+    let publishButton = q("newsPublishLinkedIn");
+    if (!publishButton) {
+      publishButton = document.createElement("button");
+      publishButton.id = "newsPublishLinkedIn";
+      publishButton.className = "action secondary";
+      publishButton.textContent = "نشر على LinkedIn";
+      q("newsShare").after(publishButton);
+    }
+    publishButton.classList.remove("hidden");
+    publishButton.onclick = async () => {
+      const image = await finalJpeg();
+      const text = parsed.caption || [parsed.headline, parsed.summary, "@cyberpulse_ar"].join("\n\n");
+      window.cyberPulseLinkedIn?.publish(text, image);
+    };
     q("newsMsg").textContent =
       "تم إنشاء الخبر. التفاصيل والإجراءات موجودة في النص الجاهز للنشر.";
   }

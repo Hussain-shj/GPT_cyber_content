@@ -52,7 +52,7 @@
           <div class="section-title"><h3>محتوى مواقع التواصل</h3><span class="counter">LinkedIn / Instagram</span></div>
           <button id="vaCreateSocial" class="action secondary">✨ إنشاء المحتوى المنسق</button>
           <textarea id="vaSocialCopy" rows="12" placeholder="سيظهر هنا منشور منسق قابل للتعديل: عنوان، فقرات، إجراءات بالأيقونات، خاتمة وهاشتاقات"></textarea>
-          <button id="vaCopySocial" class="action secondary">📋 نسخ المحتوى</button>
+          <div class="row"><button id="vaCopySocial" class="action secondary">📋 نسخ المحتوى</button><button id="vaPublishLinkedIn" class="action secondary">نشر على LinkedIn</button></div>
           <div id="vaSocialStatus" class="status"></div>
         </div>
         <button id="vaGenerate" class="action va-generate">🎬 إنشاء مواد المعاينة</button>
@@ -84,6 +84,11 @@
     byId("vaAnalyzeIdea").onclick = analyzeIdea;
     byId("vaCreateSocial").onclick = createSocialCopy;
     byId("vaCopySocial").onclick = copySocialCopy;
+    byId("vaPublishLinkedIn").onclick = () => {
+      const text = byId("vaSocialCopy").value.trim();
+      if (!text) return byId("vaSocialStatus").textContent = "أنشئ المحتوى أولًا أو اكتب النص في الخانة.";
+      window.cyberPulseLinkedIn?.publish(text);
+    };
     byId("vaLoadArchives").onclick = loadVisualArchives;
     if (location.hash === "#visual-alert-editor") tab.click();
   }

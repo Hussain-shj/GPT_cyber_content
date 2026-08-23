@@ -43,6 +43,20 @@ The OpenAI API key must never be placed in `index.html`. Keep it in Railway Vari
 - `POST /api/generate-image`
 - `POST /api/news-video`
 - `GET /api/news-video/{job_id}`
+
+## LinkedIn personal publishing
+
+Create a LinkedIn Developer application, add the **Share on LinkedIn** and
+**Sign In with LinkedIn using OpenID Connect** products, then configure:
+
+- `LINKEDIN_CLIENT_ID`
+- `LINKEDIN_CLIENT_SECRET`
+- `LINKEDIN_REDIRECT_URI=https://gptcontent-production.up.railway.app/auth/linkedin/callback`
+- `LINKEDIN_API_VERSION=202608` (optional)
+
+The OAuth access token is encrypted before it is stored in PostgreSQL. The UI
+always shows an editable preview before publishing and supports text or a
+single JPEG/PNG image on the authenticated member's personal profile.
 - `POST /api/visual-alert/render`
 - `GET /api/visual-alert/status/{job_id}`
 - `GET /api/visual-alert/video/{job_id}`
