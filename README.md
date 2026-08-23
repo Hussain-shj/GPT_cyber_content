@@ -55,8 +55,9 @@ Create a LinkedIn Developer application, add the **Share on LinkedIn** and
 - `LINKEDIN_API_VERSION=202608` (optional)
 
 The OAuth access token is encrypted before it is stored in PostgreSQL. The UI
-always shows an editable preview before publishing and supports text or a
-single JPEG/PNG image on the authenticated member's personal profile.
+always shows an editable preview before publishing and supports text, one
+JPEG/PNG image, or up to 20 ordered images through LinkedIn MultiImage posts.
+GRC slides are rendered with their Arabic text and brand logo before upload.
 - `POST /api/visual-alert/render`
 - `GET /api/visual-alert/status/{job_id}`
 - `GET /api/visual-alert/video/{job_id}`

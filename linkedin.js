@@ -26,7 +26,7 @@
     section.innerHTML = `<div class="section-title"><div><h2>LinkedIn الشخصي</h2><p>اربط حسابك مرة واحدة، ثم انشر المحتوى والصورة مباشرة بعد المعاينة.</p></div><span class="counter">OAuth 2.0</span></div><div id="liStatus" class="li-status">جاري التحقق من الاتصال...</div><div class="row"><a id="liConnect" class="action" href="/auth/linkedin/start">ربط حساب LinkedIn</a><button id="liDisconnect" class="action danger hidden">فصل الحساب</button></div><p class="li-note">لن يتم النشر تلقائيًا. كل عملية نشر تتطلب ضغط زر «نشر على LinkedIn» بعد مراجعة النص والصورة.</p>`;
     wrap.appendChild(section);
     const style = document.createElement("style");
-    style.textContent = `.li-section{max-width:820px;margin:0 auto}.li-section h2{margin:0}.li-section p{color:#9eb2c9}.li-status{margin:18px 0;padding:14px;border:1px solid #294760;border-radius:12px;background:#081827}.li-status.connected{border-color:#1bd3cf;color:#77f2ee}.li-note{font-size:.92rem}.li-publish-modal{position:fixed;inset:0;z-index:9999;background:#020914d9;display:flex;align-items:center;justify-content:center;padding:18px}.li-publish-card{width:min(620px,100%);max-height:90vh;overflow:auto;background:#0d1a2b;border:1px solid #294760;border-radius:18px;padding:18px;direction:rtl}.li-publish-card textarea{min-height:220px;line-height:1.75}.li-publish-preview{display:block;width:min(260px,100%);max-height:330px;object-fit:contain;margin:12px auto;border-radius:12px;background:#06101d}.li-result a{color:#77f2ee}`;
+    style.textContent = `.li-section{max-width:820px;margin:0 auto}.li-section h2{margin:0}.li-section p{color:#9eb2c9}.li-status{margin:18px 0;padding:14px;border:1px solid #294760;border-radius:12px;background:#081827}.li-status.connected{border-color:#1bd3cf;color:#77f2ee}.li-note{font-size:.92rem}.li-publish-modal{position:fixed;inset:0;z-index:9999;background:#020914d9;display:flex;align-items:center;justify-content:center;padding:18px}.li-publish-card{width:min(760px,100%);max-height:90vh;overflow:auto;background:#0d1a2b;border:1px solid #294760;border-radius:18px;padding:18px;direction:rtl}.li-publish-card textarea{min-height:220px;line-height:1.75}.li-publish-images{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:9px;margin:12px 0}.li-publish-image{margin:0;text-align:center}.li-publish-image figcaption{font-size:.8rem;color:#9eb2c9}.li-publish-preview{display:block;width:100%;max-height:240px;object-fit:contain;margin:0 auto 4px;border-radius:10px;background:#06101d}.li-result a{color:#77f2ee}`;
     document.head.appendChild(style);
     tab.onclick = () => show(tab, section);
     document.querySelectorAll('.tab:not([data-view="linkedin"])').forEach((button) => button.addEventListener("click", () => section.classList.add("hidden")));
@@ -87,9 +87,16 @@
       document.querySelector('[data-view="linkedin"]')?.click();
       return;
     }
+    const images = (Array.isArray(imageDataUrl) ? imageDataUrl : imageDataUrl ? [imageDataUrl] : [])
+      .map((image) => typeof image === "string" ? {data_url:image,alt_text:""} : image)
+      .filter((image) => image?.data_url)
+      .slice(0, 20);
+    const previews = images.length
+      ? `<div class="li-publish-images">${images.map((image,index) => `<figure class="li-publish-image"><img class="li-publish-preview" src="${esc(image.data_url)}" alt="${esc(image.alt_text || `الصورة ${index + 1}`)}"><figcaption>${index + 1}. ${esc(image.alt_text || "صورة")}</figcaption></figure>`).join("")}</div>`
+      : '<p>سيتم نشر النص بدون صورة.</p>';
     const modal = document.createElement("div");
     modal.className = "li-publish-modal";
-    modal.innerHTML = `<div class="li-publish-card"><div class="section-title"><h3>معاينة منشور LinkedIn</h3><button class="copy-btn" data-li-close>إغلاق</button></div>${imageDataUrl ? `<img class="li-publish-preview" src="${esc(imageDataUrl)}" alt="الصورة التي ستُنشر">` : '<p>سيتم نشر النص بدون صورة.</p>'}<label>النص القابل للتعديل <span id="liCharacterCount" class="counter"></span></label><textarea id="liPublishText"></textarea><div class="row"><button class="action" id="liPublishConfirm">نشر الآن</button><button class="action secondary" data-li-close>إلغاء</button></div><div id="liPublishStatus" class="status li-result"></div></div>`;
+    modal.innerHTML = `<div class="li-publish-card"><div class="section-title"><h3>معاينة منشور LinkedIn${images.length > 1 ? ` — ${images.length} صور` : ""}</h3><button class="copy-btn" data-li-close>إغلاق</button></div>${previews}<label>النص القابل للتعديل <span id="liCharacterCount" class="counter"></span></label><textarea id="liPublishText"></textarea><div class="row"><button class="action" id="liPublishConfirm">نشر الآن</button><button class="action secondary" data-li-close>إلغاء</button></div><div id="liPublishStatus" class="status li-result"></div></div>`;
     document.body.appendChild(modal);
     const field = byId("liPublishText");
     field.value = String(text || "");
@@ -107,10 +114,10 @@
       const button = byId("liPublishConfirm"), content = byId("liPublishText").value.trim();
       if (!content) return byId("liPublishStatus").textContent = "النص مطلوب.";
       if (content.length > 3000) return byId("liPublishStatus").textContent = `النص يتجاوز حد LinkedIn بمقدار ${content.length - 3000} حرفًا. اختصره قبل النشر.`;
-      button.disabled = true; byId("liPublishStatus").textContent = "جاري رفع الصورة ونشر المحتوى...";
+      button.disabled = true; byId("liPublishStatus").textContent = images.length > 1 ? `جاري رفع ${images.length} صور ونشر المحتوى...` : "جاري رفع الصورة ونشر المحتوى...";
       try {
-        const image = splitDataUrl(imageDataUrl);
-        const result = await data(await fetch("/api/linkedin/publish", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:content,image_b64:image.b64,image_mime_type:image.mime})}));
+        const payloadImages = images.map((image) => {const parsed=splitDataUrl(image.data_url);return {image_b64:parsed.b64,image_mime_type:parsed.mime,alt_text:String(image.alt_text || "").slice(0,120)};});
+        const result = await data(await fetch("/api/linkedin/publish", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:content,images:payloadImages})}));
         byId("liPublishStatus").innerHTML = `تم النشر بنجاح. <a href="${esc(result.post_url)}" target="_blank" rel="noopener">فتح المنشور</a>`;
         button.textContent = "✓ تم النشر";
       } catch (error) { button.disabled = false; byId("liPublishStatus").textContent = `خطأ: ${error.message}`; }

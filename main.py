@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.49.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.50.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -109,10 +109,16 @@ class ArchivePost(BaseModel):
     platform: str = "Both"
     content: dict[str, Any]
 
+class LinkedInImage(BaseModel):
+    image_b64: str = Field(min_length=1, max_length=18_000_000)
+    image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
+    alt_text: str = Field(default="", max_length=120)
+
 class LinkedInPublishRequest(BaseModel):
     text: str = Field(min_length=1, max_length=3000)
     image_b64: str = Field(default="", max_length=18_000_000)
     image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
+    images: list[LinkedInImage] = Field(default_factory=list, max_length=20)
 
 def database_url(): return os.getenv("DATABASE_URL")
 
@@ -230,7 +236,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.49.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.50.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -321,18 +327,28 @@ def linkedin_publish(req: LinkedInPublishRequest):
     author = "urn:li:person:" + connection["member_id"]
     headers = {"Authorization":f"Bearer {token}","Linkedin-Version":os.getenv("LINKEDIN_API_VERSION", "202608"),"X-Restli-Protocol-Version":"2.0.0","Content-Type":"application/json"}
     content = None
+    images = list(req.images)
+    if not images and req.image_b64:
+        images.append(LinkedInImage(image_b64=req.image_b64, image_mime_type=req.image_mime_type))
+    uploaded_images = []
     with httpx.Client(timeout=120) as client:
-        if req.image_b64:
-            try: image_bytes = base64.b64decode(req.image_b64, validate=True)
-            except Exception: raise HTTPException(400, "بيانات الصورة غير صالحة")
-            if len(image_bytes) > 10 * 1024 * 1024: raise HTTPException(413, "حجم الصورة يتجاوز 10 MB")
+        for index, image in enumerate(images, 1):
+            try: image_bytes = base64.b64decode(image.image_b64, validate=True)
+            except Exception: raise HTTPException(400, f"بيانات الصورة {index} غير صالحة")
+            if len(image_bytes) > 10 * 1024 * 1024: raise HTTPException(413, f"حجم الصورة {index} يتجاوز 10 MB")
             init = client.post("https://api.linkedin.com/rest/images?action=initializeUpload", headers=headers, json={"initializeUploadRequest":{"owner":author}})
-            if init.status_code >= 400: raise HTTPException(init.status_code, f"تعذر تهيئة صورة LinkedIn: {init.text[:700]}")
+            if init.status_code >= 400: raise HTTPException(init.status_code, f"تعذر تهيئة صورة LinkedIn رقم {index}: {init.text[:700]}")
             value = init.json().get("value", {}); upload_url = value.get("uploadUrl"); image_urn = value.get("image")
-            if not upload_url or not image_urn: raise HTTPException(502, "لم يُرجع LinkedIn رابط رفع الصورة")
-            upload = client.put(upload_url, content=image_bytes, headers={"Content-Type":req.image_mime_type})
-            if upload.status_code >= 400: raise HTTPException(upload.status_code, f"تعذر رفع صورة LinkedIn: {upload.text[:500]}")
-            content = {"media":{"title":"نبض سيبراني | CYBER PULSE","id":image_urn}}
+            if not upload_url or not image_urn: raise HTTPException(502, f"لم يُرجع LinkedIn رابط رفع الصورة {index}")
+            upload = client.put(upload_url, content=image_bytes, headers={"Content-Type":image.image_mime_type})
+            if upload.status_code >= 400: raise HTTPException(upload.status_code, f"تعذر رفع صورة LinkedIn رقم {index}: {upload.text[:500]}")
+            item = {"id":image_urn}
+            if image.alt_text: item["altText"] = image.alt_text
+            uploaded_images.append(item)
+        if len(uploaded_images) == 1:
+            content = {"media":{"title":"نبض سيبراني | CYBER PULSE","id":uploaded_images[0]["id"]}}
+        elif len(uploaded_images) > 1:
+            content = {"multiImage":{"images":uploaded_images}}
         body = {"author":author,"commentary":req.text,"visibility":"PUBLIC","distribution":{"feedDistribution":"MAIN_FEED","targetEntities":[],"thirdPartyDistributionChannels":[]},"lifecycleState":"PUBLISHED","isReshareDisabledByAuthor":False}
         if content: body["content"] = content
         response = client.post("https://api.linkedin.com/rest/posts", headers=headers, json=body)
@@ -341,7 +357,7 @@ def linkedin_publish(req: LinkedInPublishRequest):
     post_url = "https://www.linkedin.com/feed/update/" + post_urn + "/" if post_urn else "https://www.linkedin.com/feed/"
     with db_conn() as c:
         c.execute("INSERT INTO linkedin_publications(id,post_urn,post_url,has_image) VALUES(%s,%s,%s,%s)", (str(uuid.uuid4()),post_urn,post_url,bool(content))); c.commit()
-    return {"published":True,"post_urn":post_urn,"post_url":post_url}
+    return {"published":True,"post_urn":post_urn,"post_url":post_url,"image_count":len(uploaded_images)}
 
 def _visual_job_update(job_id: str, **values):
     with VISUAL_ALERT_JOBS_LOCK:

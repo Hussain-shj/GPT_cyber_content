@@ -65,9 +65,10 @@
     return new Blob([a], { type });
   }
   async function grcJpeg(i) {
-    const s = slide(i),
-      im = document.querySelectorAll(".slide")[i]?.querySelector(".art > img");
-    if (!s?.image_b64 || !im?.naturalWidth) throw Error("الصورة غير جاهزة");
+    const s = slide(i);
+    if (!s?.image_b64) throw Error("الصورة غير جاهزة");
+    const existing = document.querySelectorAll(".slide")[i]?.querySelector(".art > img");
+    const im = existing?.naturalWidth ? existing : await load(`data:${s.image_mime_type || "image/jpeg"};base64,${s.image_b64}`);
     await document.fonts?.ready;
     const c = document.createElement("canvas");
     c.width = W;
@@ -107,6 +108,17 @@
     );
     return c.toDataURL("image/jpeg", 0.94);
   }
+  window.cyberPulseGrcImages = {
+    async renderAll() {
+      const slides = current?.data?.slides || [];
+      const rendered = [];
+      for (let i = 0; i < slides.length; i++) {
+        if (!slides[i]?.image_b64) continue;
+        rendered.push({data_url:await grcJpeg(i),alt_text:String(slides[i].headline || `شريحة ${i + 1}`).slice(0, 120)});
+      }
+      return rendered;
+    },
+  };
   async function grcFile(i) {
     return new File(
       [dataBlob(await grcJpeg(i))],
