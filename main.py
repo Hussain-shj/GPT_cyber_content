@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.50.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.50.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -236,7 +236,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.50.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.50.1", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -321,8 +321,20 @@ def linkedin_disconnect():
     with db_conn() as c: c.execute("DELETE FROM linkedin_connections WHERE id='personal'"); c.commit()
     return {"disconnected":True}
 
+def _linkedin_rtl_text(text: str):
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not re.search(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]", normalized):
+        return normalized
+    return "\n".join(
+        line if not line.strip() or line.startswith("\u200f") else "\u200f" + line
+        for line in normalized.split("\n")
+    )
+
 @app.post("/api/linkedin/publish")
 def linkedin_publish(req: LinkedInPublishRequest):
+    post_text = _linkedin_rtl_text(req.text)
+    if len(post_text) > 3000:
+        raise HTTPException(400, f"النص يتجاوز حد LinkedIn بمقدار {len(post_text) - 3000} حرفًا بعد ضبط الاتجاه. اختصره قبل النشر.")
     token, connection = _linkedin_token()
     author = "urn:li:person:" + connection["member_id"]
     headers = {"Authorization":f"Bearer {token}","Linkedin-Version":os.getenv("LINKEDIN_API_VERSION", "202608"),"X-Restli-Protocol-Version":"2.0.0","Content-Type":"application/json"}
@@ -349,7 +361,7 @@ def linkedin_publish(req: LinkedInPublishRequest):
             content = {"media":{"title":"نبض سيبراني | CYBER PULSE","id":uploaded_images[0]["id"]}}
         elif len(uploaded_images) > 1:
             content = {"multiImage":{"images":uploaded_images}}
-        body = {"author":author,"commentary":req.text,"visibility":"PUBLIC","distribution":{"feedDistribution":"MAIN_FEED","targetEntities":[],"thirdPartyDistributionChannels":[]},"lifecycleState":"PUBLISHED","isReshareDisabledByAuthor":False}
+        body = {"author":author,"commentary":post_text,"visibility":"PUBLIC","distribution":{"feedDistribution":"MAIN_FEED","targetEntities":[],"thirdPartyDistributionChannels":[]},"lifecycleState":"PUBLISHED","isReshareDisabledByAuthor":False}
         if content: body["content"] = content
         response = client.post("https://api.linkedin.com/rest/posts", headers=headers, json=body)
     if response.status_code >= 400: raise HTTPException(response.status_code, f"فشل النشر على LinkedIn: {response.text[:900]}")
