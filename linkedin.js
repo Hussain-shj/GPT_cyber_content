@@ -89,13 +89,24 @@
     }
     const modal = document.createElement("div");
     modal.className = "li-publish-modal";
-    modal.innerHTML = `<div class="li-publish-card"><div class="section-title"><h3>معاينة منشور LinkedIn</h3><button class="copy-btn" data-li-close>إغلاق</button></div>${imageDataUrl ? `<img class="li-publish-preview" src="${esc(imageDataUrl)}" alt="الصورة التي ستُنشر">` : '<p>سيتم نشر النص بدون صورة.</p>'}<label>النص القابل للتعديل</label><textarea id="liPublishText" maxlength="3000"></textarea><div class="row"><button class="action" id="liPublishConfirm">نشر الآن</button><button class="action secondary" data-li-close>إلغاء</button></div><div id="liPublishStatus" class="status li-result"></div></div>`;
+    modal.innerHTML = `<div class="li-publish-card"><div class="section-title"><h3>معاينة منشور LinkedIn</h3><button class="copy-btn" data-li-close>إغلاق</button></div>${imageDataUrl ? `<img class="li-publish-preview" src="${esc(imageDataUrl)}" alt="الصورة التي ستُنشر">` : '<p>سيتم نشر النص بدون صورة.</p>'}<label>النص القابل للتعديل <span id="liCharacterCount" class="counter"></span></label><textarea id="liPublishText"></textarea><div class="row"><button class="action" id="liPublishConfirm">نشر الآن</button><button class="action secondary" data-li-close>إلغاء</button></div><div id="liPublishStatus" class="status li-result"></div></div>`;
     document.body.appendChild(modal);
-    byId("liPublishText").value = String(text || "").slice(0, 3000);
+    const field = byId("liPublishText");
+    field.value = String(text || "");
+    const updateCount = () => {
+      const length = field.value.length;
+      byId("liCharacterCount").textContent = `${length} / 3000`;
+      byId("liCharacterCount").style.color = length > 3000 ? "#ff7777" : "";
+      if (length > 3000) byId("liPublishStatus").textContent = `النص يتجاوز حد LinkedIn بمقدار ${length - 3000} حرفًا. اختصره من المعاينة قبل النشر.`;
+      else if (byId("liPublishStatus").textContent.startsWith("النص يتجاوز حد LinkedIn")) byId("liPublishStatus").textContent = "";
+    };
+    field.addEventListener("input", updateCount);
+    updateCount();
     modal.querySelectorAll("[data-li-close]").forEach((button) => button.onclick = () => modal.remove());
     byId("liPublishConfirm").onclick = async () => {
       const button = byId("liPublishConfirm"), content = byId("liPublishText").value.trim();
       if (!content) return byId("liPublishStatus").textContent = "النص مطلوب.";
+      if (content.length > 3000) return byId("liPublishStatus").textContent = `النص يتجاوز حد LinkedIn بمقدار ${content.length - 3000} حرفًا. اختصره قبل النشر.`;
       button.disabled = true; byId("liPublishStatus").textContent = "جاري رفع الصورة ونشر المحتوى...";
       try {
         const image = splitDataUrl(imageDataUrl);

@@ -429,7 +429,16 @@ s.innerHTML = `<div class="section-title"><div><h2 style="margin:0">الأخبا
     publishButton.classList.remove("hidden");
     publishButton.onclick = async () => {
       const image = await finalJpeg();
-      const text = parsed.caption || [parsed.headline, parsed.summary, "@cyberpulse_ar"].join("\n\n");
+      const readyPost = q("newsPostText")?.value.trim();
+      const hashtags = (parsed.hashtags || [])
+        .map((tag) => String(tag).trim())
+        .filter(Boolean)
+        .map((tag) => tag.startsWith("#") ? tag : `#${tag.replace(/^#+/, "")}`)
+        .join(" ");
+      const fallback = [parsed.caption || [parsed.headline, parsed.summary, "@cyberpulse_ar"].filter(Boolean).join("\n\n"), hashtags]
+        .filter(Boolean)
+        .join("\n\n");
+      const text = readyPost || fallback;
       window.cyberPulseLinkedIn?.publish(text, image);
     };
     q("newsMsg").textContent =
