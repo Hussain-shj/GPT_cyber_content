@@ -1,0 +1,1 @@
+LinkedIn AI Studio visual generation now offers exactly two selectable concepts for single-image posts: Executive Editorial and Conceptual 3D. The user must explicitly select one design before publishing. Carousel behavior remains unchanged.
