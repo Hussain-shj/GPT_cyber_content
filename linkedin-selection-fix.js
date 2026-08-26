@@ -79,7 +79,7 @@
       const selected = Number.isInteger(post.selected_visual) ? post.selected_visual : Number(post.selected_visual);
       const image = post.visual_options?.[selected];
       if (!image?.data_url) {
-        if (status) status.textContent = 'اختر أحد التصميمين أولًا.';
+        if (status) status.textContent = 'أنشئ التصميم أولًا.';
         return;
       }
 
