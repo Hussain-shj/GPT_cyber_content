@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.50.2")
+app = FastAPI(title="GPT Cyber Content API", version="0.50.3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -236,9 +236,9 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.50.2", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.50.3", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
-        "image_provider":"google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "unconfigured",
+        "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
         "database_connected":bool(database_url()), "active_users":user_count(), "google_drive_configured":all(os.getenv(key) for key in ("GOOGLE_DRIVE_CLIENT_ID","GOOGLE_DRIVE_CLIENT_SECRET","GOOGLE_DRIVE_REFRESH_TOKEN")), "news_parser":"source-date-verified-v4",
         "news_artwork":"two-line-cve-layout-v12", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
@@ -1398,12 +1398,54 @@ def generate_nano_banana_image(prompt: str, aspect_ratio: str = "4:5") -> tuple[
         raise ValueError("Nano Banana returned no image data")
     return image_b64, model
 
+def generate_openai_image(prompt: str) -> tuple[str, str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is not configured")
+    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
+    response = OpenAI(api_key=api_key, timeout=300).images.generate(
+        model=model,
+        prompt=prompt,
+        size="1024x1536",
+        quality=os.getenv("OPENAI_IMAGE_QUALITY", "medium").strip(),
+        output_format="jpeg",
+        n=1,
+    )
+    item = response.data[0] if response.data else None
+    image_b64 = getattr(item, "b64_json", "") if item else ""
+    if not image_b64 and item and getattr(item, "url", ""):
+        image_response = httpx.get(item.url, timeout=120, follow_redirects=True)
+        image_response.raise_for_status()
+        image_b64 = base64.b64encode(image_response.content).decode("ascii")
+    if not image_b64:
+        raise ValueError("OpenAI returned no image data")
+    return image_b64, model
+
+def _is_quota_error(error: Exception):
+    message = str(error).lower()
+    return any(marker in message for marker in ("quota", "429", "resource_exhausted", "rate limit", "rate_limit", "exceeded"))
+
 @app.post("/api/generate-image")
 def generate_image(req: ImageRequest):
-    if not os.getenv("GEMINI_API_KEY"): raise HTTPException(400, "GEMINI_API_KEY is not configured")
+    if not os.getenv("GEMINI_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(400, "لم يتم إعداد أي مزود لتوليد الصور")
     try:
         base_prompt = visual_prompt(req)
-        image_b64, image_model = generate_nano_banana_image(base_prompt)
+        image_provider = "openai"
+        fallback_used = False
+        fallback_reason = ""
+        if os.getenv("GEMINI_API_KEY"):
+            try:
+                image_b64, image_model = generate_nano_banana_image(base_prompt)
+                image_provider = "google_nano_banana_2"
+            except Exception as gemini_error:
+                if not os.getenv("OPENAI_API_KEY"):
+                    raise
+                fallback_used = True
+                fallback_reason = "gemini_quota" if _is_quota_error(gemini_error) else "gemini_error"
+                image_b64, image_model = generate_openai_image(base_prompt)
+        else:
+            image_b64, image_model = generate_openai_image(base_prompt)
         if os.getenv("OPENAI_API_KEY"):
             try:
                 review = review_artwork(OpenAI(api_key=os.getenv("OPENAI_API_KEY")), req, image_b64)
@@ -1411,5 +1453,5 @@ def generate_image(req: ImageRequest):
                 review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"تعذر تنفيذ المراجعة البصرية، وتم الاحتفاظ بالصورة المولدة.","review_error":str(review_error)[:300]}
         else:
             review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"لم تُنفذ المراجعة البصرية لأن OPENAI_API_KEY غير مهيأ."}
-        return {"b64_json":image_b64,"mime_type":"image/jpeg","slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"nano-banana-three-choice-v9","generation_attempts":1,"variant_index":req.variant_index,"image_provider":"google_nano_banana_2","image_model":image_model,"semantic_review":review}
+        return {"b64_json":image_b64,"mime_type":"image/jpeg","slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"single-image-provider-fallback-v10","generation_attempts":1,"variant_index":req.variant_index,"image_provider":image_provider,"image_model":image_model,"fallback_used":fallback_used,"fallback_reason":fallback_reason,"semantic_review":review}
     except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")

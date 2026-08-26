@@ -17,7 +17,7 @@ AI content studio for cybersecurity, GRC, AI governance and privacy content.
 3. Add Railway variable `OPENAI_API_KEY`.
 4. Optional variables:
    - `OPENAI_MODEL=gpt-5`
-   - `OPENAI_IMAGE_MODEL=gpt-image-1`
+   - `OPENAI_IMAGE_MODEL=gpt-image-1` (automatic fallback when Gemini image quota is unavailable)
    - `GEMINI_API_KEY` for Nano Banana images and Visual Alert Editor voice-over
    - `GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview` (optional and replaceable)
    - `GEMINI_TTS_VOICE=Charon` (optional)
