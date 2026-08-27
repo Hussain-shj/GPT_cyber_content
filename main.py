@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.50.4")
+app = FastAPI(title="GPT Cyber Content API", version="0.51.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -120,6 +120,17 @@ class LinkedInPublishRequest(BaseModel):
     image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
     images: list[LinkedInImage] = Field(default_factory=list, max_length=20)
 
+class SupportingFileGenerateRequest(BaseModel):
+    post_id: str = Field(min_length=3, max_length=200)
+    post_title: str = Field(min_length=3, max_length=500)
+    post_text: str = Field(min_length=20, max_length=12000)
+    pillar: str = Field(default="GRC", max_length=200)
+    file_type: Literal["دليل عملي", "قائمة تحقق", "ملخص تنفيذي", "نموذج عمل"] = "دليل عملي"
+
+class SupportingFileUpdateRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=500)
+    content: str = Field(min_length=50, max_length=30000)
+
 def database_url(): return os.getenv("DATABASE_URL")
 
 VIDEO_JOBS: dict[str, dict[str, Any]] = {}
@@ -173,6 +184,9 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visual_alert_archives_created_at ON visual_alert_archives(created_at DESC)")
         conn.execute("CREATE TABLE IF NOT EXISTS linkedin_connections(id TEXT PRIMARY KEY DEFAULT 'personal',member_id TEXT NOT NULL,member_name TEXT NOT NULL DEFAULT '',access_token_encrypted TEXT NOT NULL,expires_at TIMESTAMPTZ,connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         conn.execute("CREATE TABLE IF NOT EXISTS linkedin_publications(id TEXT PRIMARY KEY,post_urn TEXT NOT NULL,post_url TEXT NOT NULL,has_image BOOLEAN NOT NULL DEFAULT FALSE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_supporting_files(id TEXT PRIMARY KEY,post_id TEXT NOT NULL,title TEXT NOT NULL,file_type TEXT NOT NULL,pillar TEXT NOT NULL DEFAULT 'GRC',content TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_linkedin_supporting_files_post ON linkedin_supporting_files(post_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_supporting_files_created ON linkedin_supporting_files(created_at DESC)")
         conn.commit()
 
 def bootstrap_user():
@@ -236,7 +250,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.50.4", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.51.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -370,6 +384,121 @@ def linkedin_publish(req: LinkedInPublishRequest):
     with db_conn() as c:
         c.execute("INSERT INTO linkedin_publications(id,post_urn,post_url,has_image) VALUES(%s,%s,%s,%s)", (str(uuid.uuid4()),post_urn,post_url,bool(content))); c.commit()
     return {"published":True,"post_urn":post_urn,"post_url":post_url,"image_count":len(uploaded_images)}
+
+def _supporting_file_fallback(req: SupportingFileGenerateRequest):
+    practical = [line.strip(" -•\t") for line in req.post_text.splitlines() if line.strip().startswith(("•", "-"))]
+    practical = practical[:7] or ["حدّد مالكًا واضحًا لكل إجراء وموعدًا مستهدفًا للتنفيذ.", "اربط القرار بالمخاطر والأثر المتوقع على العمل.", "وثّق الأدلة والنتائج، ثم راجع التقدم بصورة دورية."]
+    return "\n".join([f"# {req.post_title}", "## الهدف من الملف", "يحوّل هذا الملف فكرة المنشور إلى خطوات عملية قابلة للمراجعة والتطبيق داخل المؤسسة.", "## لمن أُعد هذا الملف؟", "لقيادات الأمن السيبراني والحوكمة وإدارة المخاطر ومالكي الخدمات والعمليات.", "## خطوات التطبيق", *[f"- {item}" for item in practical], "## أسئلة المراجعة", "- هل نطاق الموضوع والقرار المطلوب محددان بوضوح؟", "- هل يوجد مالك تنفيذي ومؤشر لقياس التقدم؟", "- هل تم توثيق المخاطر والاعتماد والاستثناءات؟", "## المخرج المطلوب", "قرار موثق، وخطة تنفيذ محددة المسؤوليات والمواعيد، وآلية متابعة قابلة للقياس.", "## تنبيه مهني", "هذا الملف إرشادي ويجب تكييفه مع سياسات المؤسسة ومتطلباتها التنظيمية وشهية المخاطر المعتمدة."])
+
+def _generate_supporting_file_content(req: SupportingFileGenerateRequest):
+    if not os.getenv("OPENAI_API_KEY"): return _supporting_file_fallback(req)
+    prompt = f'''أنت مستشار أمن معلومات وحوكمة مؤسسية. أنشئ ملفًا داعمًا عربيًا احترافيًا من نوع: {req.file_type}.
+الموضوع: {req.post_title}
+المجال: {req.pillar}
+نص منشور LinkedIn المصدر:
+{req.post_text}
+
+استخدم فقط الأفكار المدعومة في المنشور، ولا تخترع أرقامًا أو قوانين أو معايير أو مراجع. حوّل المنشور إلى قيمة عملية أعمق دون تكراره حرفيًا.
+أعد Markdown عربيًا فقط، من 700 إلى 1200 كلمة، يبدأ بعنوان # واحد، ثم أقسام ## قصيرة وواضحة. أضف حسب ملاءمة النوع: الهدف، الجمهور، طريقة الاستخدام، خطوات عملية، قائمة تحقق، أسئلة قرار، مخرجات متوقعة، وتنبيه مهني. استخدم قوائم تبدأ بـ - عند الحاجة. لا تضف هاشتاقات أو دعوة تسويقية أو معلومات تواصل.'''
+    result = OpenAI(api_key=os.getenv("OPENAI_API_KEY")).responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False)
+    content = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", result.output_text.strip(), flags=re.I|re.S)
+    if len(content) < 200: raise HTTPException(502, "لم يُرجع النموذج محتوى كافيًا للملف الداعم")
+    return content
+
+@app.get("/api/linkedin/supporting-files")
+def linkedin_supporting_files():
+    with db_conn() as c: return c.execute("SELECT id,post_id,title,file_type,pillar,content,created_at,updated_at FROM linkedin_supporting_files ORDER BY created_at DESC LIMIT 100").fetchall()
+
+@app.post("/api/linkedin/supporting-files")
+def linkedin_supporting_file_generate(req: SupportingFileGenerateRequest):
+    content = _generate_supporting_file_content(req)
+    title = next((line.lstrip("# ").strip() for line in content.splitlines() if line.startswith("# ")), req.post_title)
+    file_id = str(uuid.uuid4())
+    with db_conn() as c:
+        existing = c.execute("SELECT id FROM linkedin_supporting_files WHERE post_id=%s", (req.post_id,)).fetchone()
+        if existing:
+            file_id = existing["id"]
+            c.execute("UPDATE linkedin_supporting_files SET title=%s,file_type=%s,pillar=%s,content=%s,updated_at=NOW() WHERE id=%s", (title,req.file_type,req.pillar,content,file_id))
+        else: c.execute("INSERT INTO linkedin_supporting_files(id,post_id,title,file_type,pillar,content) VALUES(%s,%s,%s,%s,%s,%s)", (file_id,req.post_id,title,req.file_type,req.pillar,content))
+        c.commit()
+    return {"id":file_id,"post_id":req.post_id,"title":title,"file_type":req.file_type,"pillar":req.pillar,"content":content}
+
+@app.put("/api/linkedin/supporting-files/{file_id}")
+def linkedin_supporting_file_update(file_id: str, req: SupportingFileUpdateRequest):
+    with db_conn() as c: cur = c.execute("UPDATE linkedin_supporting_files SET title=%s,content=%s,updated_at=NOW() WHERE id=%s", (req.title,req.content,file_id)); c.commit()
+    if not cur.rowcount: raise HTTPException(404, "الملف الداعم غير موجود")
+    return {"saved":True,"id":file_id}
+
+@app.delete("/api/linkedin/supporting-files/{file_id}")
+def linkedin_supporting_file_delete(file_id: str):
+    with db_conn() as c: cur = c.execute("DELETE FROM linkedin_supporting_files WHERE id=%s", (file_id,)); c.commit()
+    return {"deleted":bool(cur.rowcount)}
+
+def _supporting_pdf(record):
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.colors import HexColor
+    from reportlab.lib.utils import ImageReader
+    from PIL import Image, ImageDraw, ImageFont
+    font_path = BASE_DIR / "assets" / "fonts" / "Cairo.ttf"
+    if not font_path.exists(): raise HTTPException(500, "خط Cairo غير موجود في الخادم")
+    out = io.BytesIO(); width, height = A4; c = canvas.Canvas(out, pagesize=A4, pageCompression=1)
+    navy, cyan, ink, muted, pale = map(HexColor, ("#071827","#18C7C2","#102B45","#567086","#F2F7FA"))
+    margin, right, y, page = 44, width-44, height-116, 0
+    scale=3
+    font_cache={}
+    measure_draw=ImageDraw.Draw(Image.new("RGBA",(2,2)))
+    def pil_font(size):
+        key=int(size*scale)
+        if key not in font_cache: font_cache[key]=ImageFont.truetype(str(font_path),key)
+        return font_cache[key]
+    def text_width(value,size): return measure_draw.textlength(str(value),font=pil_font(size),direction="rtl",language="ar")/scale
+    def draw_rtl(value,x_right,y_baseline,size,color):
+        value=str(value); font=pil_font(size); box=measure_draw.textbbox((0,0),value,font=font,direction="rtl",language="ar",stroke_width=0)
+        px_w=max(2,box[2]-box[0]+10*scale); px_h=max(2,box[3]-box[1]+6*scale)
+        image=Image.new("RGBA",(px_w,px_h),(255,255,255,0)); draw=ImageDraw.Draw(image)
+        if color.startswith("0x"): color="#"+color[2:]
+        rgb=tuple(int(color[i:i+2],16) for i in (1,3,5))+(255,)
+        draw.text((px_w-4*scale,-box[1]+2*scale),value,font=font,fill=rgb,anchor="ra",direction="rtl",language="ar")
+        pt_w,pt_h=px_w/scale,px_h/scale
+        c.drawImage(ImageReader(image),x_right-pt_w,y_baseline-(pt_h*.72),width=pt_w,height=pt_h,mask="auto")
+    def page_start():
+        nonlocal y,page; page+=1; c.setFillColor(navy); c.rect(0,height-78,width,78,stroke=0,fill=1); c.setStrokeColor(cyan); c.setLineWidth(3); c.line(margin,height-78,right,height-78); draw_rtl("نبض سيبراني",right,height-34,17,"#18C7C2"); draw_rtl("معلومة موثوقة .. وحماية تبدأ بالوعي",right,height-55,8.5,"#D7FFFF"); c.setFillColor(muted); c.setFont("Helvetica",8); c.drawString(margin,24,f"CYBER PULSE  |  {page}"); y=height-112
+    def ensure(space):
+        nonlocal y
+        if y-space<48: c.showPage(); page_start()
+    def logical_wrap(text,size,max_width):
+        words=str(text).split(); lines=[]; line=""
+        for word in words:
+            test=f"{line} {word}".strip()
+            if line and text_width(test,size)>max_width: lines.append(line); line=word
+            else: line=test
+        if line: lines.append(line)
+        return lines
+    def block(text,size=10.5,color=ink,leading=18,bullet=False):
+        nonlocal y
+        lines=logical_wrap(text,size,right-margin-(18 if bullet else 0)); ensure(max(leading,len(lines)*leading+6))
+        for i,line in enumerate(lines):
+            draw_rtl(line,right-(18 if bullet else 0),y,size,color.hexval())
+            if bullet and i==0: c.setFillColor(cyan); c.circle(right-6,y+3,2.7,stroke=0,fill=1); c.setFillColor(color)
+            y-=leading
+        y-=5
+    page_start()
+    for raw in record["content"].splitlines():
+        line=raw.strip()
+        if not line: y-=6; continue
+        if line.startswith("# "): ensure(85); c.setFillColor(pale); c.roundRect(margin,y-58,right-margin,72,10,stroke=0,fill=1); block(line[2:],18,navy,25); y-=10
+        elif line.startswith("## "): ensure(48); y-=5; block(line[3:],13.5,HexColor("#087F82"),22); c.setStrokeColor(HexColor("#C7E8E7")); c.line(margin,y+5,right,y+5); y-=7
+        elif line.startswith(("- ","• ")): block(line[2:],10.2,ink,18,bullet=True)
+        else: block(line,10.5,ink,18)
+    c.save(); out.seek(0); return out.getvalue()
+
+@app.get("/api/linkedin/supporting-files/{file_id}/pdf")
+def linkedin_supporting_file_pdf(file_id: str):
+    with db_conn() as c: record = c.execute("SELECT id,title,content FROM linkedin_supporting_files WHERE id=%s", (file_id,)).fetchone()
+    if not record: raise HTTPException(404, "الملف الداعم غير موجود")
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", record["title"]).strip("-")[:60] or "cyber-pulse-supporting-file"
+    return Response(_supporting_pdf(record), media_type="application/pdf", headers={"Content-Disposition":f'attachment; filename="{safe}.pdf"',"Cache-Control":"no-store"})
 
 def _visual_job_update(job_id: str, **values):
     with VISUAL_ALERT_JOBS_LOCK:
