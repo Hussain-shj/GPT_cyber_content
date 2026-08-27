@@ -57,6 +57,14 @@ Create a LinkedIn Developer application, add the **Share on LinkedIn** and
 The OAuth access token is encrypted before it is stored in PostgreSQL. The UI
 always shows an editable preview before publishing and supports text, one
 JPEG/PNG image, or up to 20 ordered images through LinkedIn MultiImage posts.
+
+### LinkedIn supporting files
+
+LinkedIn AI Studio can generate an Arabic supporting file for any post as a
+practical guide, checklist, executive brief, or working template. The draft is
+editable, stored centrally in PostgreSQL, and downloaded as a branded RTL PDF
+using the bundled Cairo font. A post that promises readers a supporting file is
+blocked from publishing until the file has been generated.
 GRC slides are rendered with their Arabic text and brand logo before upload.
 - `POST /api/visual-alert/render`
 - `GET /api/visual-alert/status/{job_id}`
