@@ -32,7 +32,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.52.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.53.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -188,6 +188,7 @@ def init_db():
         conn.execute("ALTER TABLE linkedin_publications ADD COLUMN IF NOT EXISTS post_text TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE linkedin_publications ADD COLUMN IF NOT EXISTS post_type TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE TABLE IF NOT EXISTS linkedin_analytics_imports(id TEXT PRIMARY KEY,source TEXT NOT NULL DEFAULT 'xlsx',filename TEXT NOT NULL DEFAULT '',row_count INTEGER NOT NULL DEFAULT 0,period_start DATE,period_end DATE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("ALTER TABLE linkedin_analytics_imports ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb")
         conn.execute("CREATE TABLE IF NOT EXISTS linkedin_analytics_records(id TEXT PRIMARY KEY,import_id TEXT NOT NULL REFERENCES linkedin_analytics_imports(id) ON DELETE CASCADE,record_kind TEXT NOT NULL DEFAULT 'post',record_date DATE,post_urn TEXT,post_url TEXT,post_title TEXT NOT NULL DEFAULT '',post_type TEXT NOT NULL DEFAULT '',impressions BIGINT NOT NULL DEFAULT 0,members_reached BIGINT NOT NULL DEFAULT 0,engagements_reported BIGINT NOT NULL DEFAULT 0,reactions BIGINT NOT NULL DEFAULT 0,comments BIGINT NOT NULL DEFAULT 0,reposts BIGINT NOT NULL DEFAULT 0,saves BIGINT NOT NULL DEFAULT 0,sends BIGINT NOT NULL DEFAULT 0,link_clicks BIGINT NOT NULL DEFAULT 0,followers_gained BIGINT NOT NULL DEFAULT 0,profile_views BIGINT NOT NULL DEFAULT 0,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_analytics_import ON linkedin_analytics_records(import_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_analytics_date ON linkedin_analytics_records(record_date)")
@@ -257,7 +258,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.52.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.53.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -554,13 +555,58 @@ def _analytics_post_urn(url):
     match = re.search(r"urn:li:(?:share|ugcPost):\d+", str(url or ""))
     return match.group() if match else None
 
+def _analytics_post_label(url):
+    slug=unquote(str(url or "").split("/posts/")[-1])
+    slug=re.sub(r"^hussain-alblooshi_", "", slug, flags=re.I)
+    slug=re.sub(r"-(?:ugcPost|share)-\d+-.+$", "", slug)
+    return re.sub(r"[-_]+", " ", slug).strip()[:500] or "منشور LinkedIn"
+
 def _parse_linkedin_xlsx(raw: bytes):
     from openpyxl import load_workbook
     try: workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
     except Exception as exc: raise HTTPException(400, f"تعذر قراءة ملف XLSX: {str(exc)[:300]}")
-    parsed=[]
+    parsed=[]; metadata={"demographics":{}}; daily_map={}; posts={}
+    def daily_record(day):
+        if day not in daily_map: daily_map[day]={"record_kind":"daily","record_date":day,"post_title":"","post_type":"",**{m:0 for m in ANALYTICS_METRICS}}
+        return daily_map[day]
     for sheet in workbook.worksheets:
         rows=[tuple(row[:60]) for row in itertools.islice(sheet.iter_rows(values_only=True),5001)]
+        sheet_name=_analytics_header(sheet.title)
+        if sheet_name=="discovery":
+            total={"record_kind":"aggregate_total","record_date":None,"post_title":"","post_type":"",**{m:0 for m in ANALYTICS_METRICS}}
+            for row in rows:
+                label=_analytics_header(row[0] if row else ""); value=row[1] if len(row)>1 else None
+                if label=="impressions": total["impressions"]=_analytics_int(value)
+                elif label=="members reached": total["members_reached"]=_analytics_int(value)
+                elif label=="overall performance": metadata["period_label"]=str(value or "")
+            if total["impressions"] or total["members_reached"]: parsed.append(total)
+            continue
+        if sheet_name=="engagement" and rows:
+            for row in rows[1:]:
+                day=_analytics_date(row[0] if row else None)
+                if day:
+                    target=daily_record(day); target["impressions"]=_analytics_int(row[1] if len(row)>1 else 0); target["engagements_reported"]=_analytics_int(row[2] if len(row)>2 else 0)
+            continue
+        if sheet_name=="followers":
+            if rows: metadata["total_followers"]=_analytics_int(rows[0][1] if len(rows[0])>1 else 0)
+            for row in rows[3:]:
+                day=_analytics_date(row[0] if row else None)
+                if day: daily_record(day)["followers_gained"]=_analytics_int(row[1] if len(row)>1 else 0)
+            continue
+        if sheet_name=="top posts":
+            for row in rows[3:]:
+                for base,metric in ((0,"engagements_reported"),(4,"impressions")):
+                    url=str(row[base] or "").strip() if len(row)>base else ""
+                    if not url: continue
+                    target=posts.setdefault(url,{"record_kind":"post","record_date":_analytics_date(row[base+1] if len(row)>base+1 else None),"post_urn":_analytics_post_urn(url),"post_url":url[:2000],"post_title":_analytics_post_label(url),"post_type":"",**{m:0 for m in ANALYTICS_METRICS}})
+                    target[metric]=_analytics_int(row[base+2] if len(row)>base+2 else 0)
+            continue
+        if sheet_name in ("audience demographics","content demographics"):
+            key="audience" if sheet_name.startswith("audience") else "content"; groups={}
+            for row in rows[1:]:
+                if len(row)>=3 and row[0]: groups.setdefault(str(row[0]),[]).append({"label":str(row[1]),"percentage":str(row[2])})
+            metadata["demographics"][key]=groups
+            continue
         header_index=None; columns={}
         for idx,row in enumerate(rows[:30]):
             mapped={pos:ANALYTICS_HEADER_MAP.get(_analytics_header(value)) for pos,value in enumerate(row)}
@@ -577,13 +623,14 @@ def _parse_linkedin_xlsx(raw: bytes):
             sheet_rows.append({"record_kind":"post" if title or url else "daily","record_date":record_date,"post_urn":_analytics_post_urn(url),"post_url":url[:2000] or None,"post_title":title[:2000],"post_type":str(item.get("post_type") or "").strip()[:200],**metrics})
         detailed=any(x["record_kind"]=="post" or x["record_date"] for x in sheet_rows)
         parsed.extend(x for x in sheet_rows if not detailed or x["record_kind"]=="post" or x["record_date"])
+    parsed.extend(daily_map.values()); parsed.extend(posts.values())
     if not parsed: raise HTTPException(400, "لم أجد جدول تحليلات معروفًا. صدّر ملف Post analytics بصيغة XLSX من LinkedIn ثم ارفعه كما هو.")
-    return parsed
+    return {"records":parsed,"metadata":metadata}
 
-def _save_analytics_import(source, filename, records):
-    import_id=str(uuid.uuid4()); dates=[r["record_date"] for r in records if r.get("record_date")]
+def _save_analytics_import(source, filename, records, metadata=None):
+    import_id=str(uuid.uuid4()); dates=[r["record_date"] for r in records if r.get("record_date") and r.get("record_kind")=="daily"] or [r["record_date"] for r in records if r.get("record_date")]
     with db_conn() as c:
-        c.execute("INSERT INTO linkedin_analytics_imports(id,source,filename,row_count,period_start,period_end) VALUES(%s,%s,%s,%s,%s,%s)", (import_id,source,filename,len(records),min(dates) if dates else None,max(dates) if dates else None))
+        c.execute("INSERT INTO linkedin_analytics_imports(id,source,filename,row_count,period_start,period_end,metadata) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)", (import_id,source,filename,len(records),min(dates) if dates else None,max(dates) if dates else None,json.dumps(metadata or {},ensure_ascii=False)))
         for r in records:
             c.execute("INSERT INTO linkedin_analytics_records(id,import_id,record_kind,record_date,post_urn,post_url,post_title,post_type,impressions,members_reached,engagements_reported,reactions,comments,reposts,saves,sends,link_clicks,followers_gained,profile_views) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(uuid.uuid4()),import_id,r.get("record_kind","post"),r.get("record_date"),r.get("post_urn"),r.get("post_url"),r.get("post_title",""),r.get("post_type",""),*[r.get(k,0) for k in ANALYTICS_METRICS]))
         c.commit()
@@ -596,7 +643,7 @@ async def linkedin_analytics_import(file: UploadFile = File(...)):
     raw=await file.read(10*1024*1024+1)
     if len(raw)>10*1024*1024: raise HTTPException(413, "حجم الملف يتجاوز 10 MB")
     if not raw.startswith(b"PK"): raise HTTPException(400, "ملف XLSX غير صالح")
-    records=_parse_linkedin_xlsx(raw); import_id=_save_analytics_import("xlsx",filename,records)
+    result=_parse_linkedin_xlsx(raw); records=result["records"]; import_id=_save_analytics_import("xlsx",filename,records,result["metadata"])
     return {"imported":True,"import_id":import_id,"row_count":len(records),"filename":filename}
 
 def _analytics_metric_value(records, metric):
@@ -621,12 +668,49 @@ def _analytics_recommendations(records, top_posts, by_type, by_weekday, engageme
     else: tips.append({"title":"حافظ على التفاعل","text":f"معدل التفاعل الحالي {engagement_rate:.1f}%. ركّز على الحفظ والمشاركة عبر ملفات عملية وقوائم تحقق مرتبطة بالمنشور."})
     return tips[:4]
 
+def _analytics_pct(value):
+    match=re.search(r"\d+(?:\.\d+)?",str(value or "")); return float(match.group()) if match else 0
+
+def _analytics_advisor(latest, records, totals, top_posts, by_weekday, previous_totals=None):
+    daily=[r for r in records if r["record_kind"]=="daily" and r["record_date"]]; metadata=latest.get("metadata") or {}; demographics=metadata.get("demographics",{})
+    engagements=totals["engagements"]; rate=totals["engagement_rate"]; new_followers=totals.get("followers_gained",0); total_followers=_analytics_int(metadata.get("total_followers"))
+    months={}
+    for r in daily:
+        key=r["record_date"].strftime("%Y-%m"); x=months.setdefault(key,{"impressions":0,"engagements":0}); x["impressions"]+=r["impressions"]; x["engagements"]+=r["engagements_reported"]
+    best_month=max(months.items(),key=lambda x:x[1]["impressions"]) if months else None
+    active_days=sum(1 for r in daily if r["impressions"]>0); period_posts=[r for r in records if r["record_kind"]=="post" and (not latest.get("period_start") or not r["record_date"] or latest["period_start"]<=r["record_date"]<=latest["period_end"])]
+    post_days=len({r["record_date"] for r in period_posts if r["record_date"]}); max_per_day=max((sum(1 for r in period_posts if r["record_date"]==day) for day in {r["record_date"] for r in period_posts if r["record_date"]}),default=0)
+    content_demo=demographics.get("content",{}); audience_demo=demographics.get("audience",{})
+    content_sen={x["label"]:_analytics_pct(x["percentage"]) for x in content_demo.get("Seniority",[])}; audience_sen={x["label"]:_analytics_pct(x["percentage"]) for x in audience_demo.get("Seniority",[])}
+    leaders=content_sen.get("Director",0)+content_sen.get("CXO",0)+content_sen.get("VP",0); entry=content_sen.get("Entry",0)
+    strengths=[]; risks=[]
+    if rate>=3.5: strengths.append(f"معدل التفاعل {rate:.2f}% صحي ويؤكد أن المحتوى مناسب للجمهور الحالي.")
+    if best_month and totals["impressions"]: strengths.append(f"الشهر الأقوى حقق {best_month[1]['impressions']:,} مشاهدة، أي {best_month[1]['impressions']/totals['impressions']*100:.0f}% من الفترة.")
+    if top_posts: strengths.append(f"أفضل منشور حقق {top_posts[0]['impressions']:,} مشاهدة، ويمكن تحويل موضوعه إلى سلسلة وملف عملي.")
+    if post_days and len(period_posts)>post_days: risks.append(f"تم رصد {len(period_posts)} منشورًا خلال {post_days} يوم نشر، وبحد أقصى {max_per_day} منشورات في اليوم؛ هذا قد يوزع التفاعل بين المنشورات.")
+    if new_followers<30: risks.append(f"النمو بلغ {new_followers} متابعًا جديدًا فقط؛ المطلوب تقوية دعوة المتابعة وربطها بوعد معرفي واضح.")
+    if leaders and leaders<15: risks.append(f"نسبة Director/CXO/VP في جمهور المحتوى {leaders:.0f}%؛ تحتاج محتوى قرارات تنفيذية أكثر للوصول إلى أصحاب القرار.")
+    if entry>25: risks.append(f"فئة Entry تمثل {entry:.0f}% من جمهور المحتوى، ما يشير إلى أن الطرح تعليمي أكثر من كونه قياديًا.")
+    comparisons={}
+    if previous_totals:
+        for key in ("impressions","engagements","followers_gained"):
+            old=previous_totals.get(key,0); comparisons[key]={"current":totals.get(key,0),"previous":old,"change_pct":round((totals.get(key,0)-old)/old*100,1) if old else None}
+    view_target=max(4500,int(math.ceil(totals["impressions"]*1.5/500)*500)); follower_target=max(30,int(math.ceil(max(new_followers,1)*1.7/5)*5)); top_target=max(250,int(math.ceil((top_posts[0]["impressions"] if top_posts else 0)*1.25/50)*50))
+    schedule=[{"day":"الأحد","content":"تحليل قيادي: NIST أو ISO 27001 أو حوكمة المخاطر"},{"day":"الثلاثاء","content":"رأي شخصي من واقع قيادة أمن المعلومات"},{"day":"الخميس","content":"خبر أو ثغرة مع الأثر والإجراء المطلوب"},{"day":"السبت","content":"Checklist أو Carousel مع ملف داعم"}]
+    studio_plan=[
+        ["لماذا أصبحت Govern أهم إضافة في NIST CSF 2.0؟","قرار سيبراني يجب أن يملكه مجلس الإدارة","ثغرة حديثة: ما أثرها الإداري؟","Checklist: جاهزية الحوكمة وفق NIST CSF 2.0"],
+        ["5 مؤشرات مخاطر يحتاجها المدير التنفيذي","من واقع العمل: لماذا تفشل بعض سجلات المخاطر؟","كيف تربط الخبر السيبراني بقرار عملي؟","نموذج: تقرير مخاطر مختصر للإدارة العليا"],
+        ["ISO 27001: الامتثال لا يعني النضج","متى يقبل المسؤول التنفيذي المخاطر؟","مخاطر الذكاء الاصطناعي التي لا تظهر في التقارير","Checklist: مراجعة مخاطر استخدام أدوات AI"],
+        ["كيف تبني خارطة طريق سيبرانية مبنية على المخاطر؟","درس قيادي من مشروع أو حادث سيبراني","ما الذي يجب أن تسأل عنه المورد قبل التعاقد؟","Checklist: Executive GRC Health Check"]]
+    return {"executive_summary":f"حقق الحساب {totals['impressions']:,} مشاهدة و{engagements:,} تفاعل بمعدل {rate:.2f}%. الأداء يتحسن، لكن الأولوية القادمة هي تقليل تزاحم النشر وتحويل الوصول إلى متابعين وأصحاب قرار.","strengths":strengths,"risks":risks,"audience":{"leaders_pct":leaders,"entry_pct":entry,"total_followers":total_followers,"director_gap":round(audience_sen.get('Director',0)-content_sen.get('Director',0),1),"content":content_demo},"activity":{"active_days":active_days,"posts":len(period_posts),"post_days":post_days,"max_posts_per_day":max_per_day},"comparison":comparisons,"targets":[{"label":"المشاهدات","target":view_target,"current":totals["impressions"]},{"label":"معدل التفاعل","target":round(max(4.5,rate+0.6),1),"current":rate,"unit":"%"},{"label":"متابعون جدد","target":follower_target,"current":new_followers},{"label":"أفضل منشور","target":top_target,"current":top_posts[0]["impressions"] if top_posts else 0}],"content_mix":[{"label":"حوكمة ومخاطر وقرارات الإدارة","percentage":40},{"label":"أدوات وملفات داعمة","percentage":25},{"label":"أخبار وثغرات بتفسير عملي","percentage":20},{"label":"تجارب وآراء قيادية","percentage":15}],"schedule":schedule,"studio_plan":studio_plan,"measurement_note":"تحليل الأيام يعكس وقت حدوث المشاهدات، وليس بالضرورة وقت نشر المنشور؛ لذلك تعامل معه كاختبار لمدة 4 أسابيع."}
+
 @app.get("/api/linkedin/analytics/dashboard")
 def linkedin_analytics_dashboard():
     with db_conn() as c:
         latest=c.execute("SELECT * FROM linkedin_analytics_imports ORDER BY created_at DESC LIMIT 1").fetchone()
         history=c.execute("SELECT id,source,filename,row_count,period_start,period_end,created_at FROM linkedin_analytics_imports ORDER BY created_at DESC LIMIT 12").fetchall()
         records=c.execute("SELECT * FROM linkedin_analytics_records WHERE import_id=%s",(latest["id"],)).fetchall() if latest else []
+        previous_records=c.execute("SELECT * FROM linkedin_analytics_records WHERE import_id=%s",(history[1]["id"],)).fetchall() if len(history)>1 else []
     if not latest: return {"empty":True,"analytics_approved":os.getenv("LINKEDIN_ANALYTICS_APPROVED","").lower() in ("1","true","yes"),"history":[]}
     totals={k:_analytics_metric_value(records,k) for k in ANALYTICS_METRICS}; calculated_engagements=sum(totals[k] for k in ("reactions","comments","reposts","saves","sends")); engagements=totals["engagements_reported"] or calculated_engagements; engagement_rate=(engagements/totals["impressions"]*100) if totals["impressions"] else 0
     post_rows=[r for r in records if r["record_kind"]=="post"]
@@ -649,7 +733,11 @@ def linkedin_analytics_dashboard():
         for x in values: x["engagement_rate"]=round(x["engagements"]/x["impressions"]*100,2) if x["impressions"] else 0
         return sorted(values,key=lambda x:x["impressions"],reverse=True)
     by_type=finish(list(type_map.values())); by_weekday=finish(list(day_map.values()))
-    return {"empty":False,"analytics_approved":os.getenv("LINKEDIN_ANALYTICS_APPROVED","").lower() in ("1","true","yes"),"latest_import":latest,"history":history,"totals":{**totals,"engagements":engagements,"engagement_rate":round(engagement_rate,2)},"trend":sorted(trend_map.values(),key=lambda x:x["date"]),"top_posts":top,"by_type":by_type,"by_weekday":by_weekday,"recommendations":_analytics_recommendations(records,top,by_type,by_weekday,engagement_rate)}
+    totals={**totals,"engagements":engagements,"engagement_rate":round(engagement_rate,2)}
+    previous_totals=None
+    if previous_records:
+        previous_totals={k:_analytics_metric_value(previous_records,k) for k in ANALYTICS_METRICS}; previous_totals["engagements"]=previous_totals["engagements_reported"] or sum(previous_totals[k] for k in ("reactions","comments","reposts","saves","sends"))
+    return {"empty":False,"analytics_approved":os.getenv("LINKEDIN_ANALYTICS_APPROVED","").lower() in ("1","true","yes"),"latest_import":latest,"history":history,"totals":totals,"trend":sorted(trend_map.values(),key=lambda x:x["date"]),"top_posts":top,"by_type":by_type,"by_weekday":by_weekday,"recommendations":_analytics_recommendations(records,top,by_type,by_weekday,engagement_rate),"advisor":_analytics_advisor(latest,records,totals,top,by_weekday,previous_totals)}
 
 def _linkedin_analytics_headers(token): return {"Authorization":f"Bearer {token}","Linkedin-Version":os.getenv("LINKEDIN_API_VERSION","202608"),"X-Restli-Protocol-Version":"2.0.0","Content-Type":"application/json"}
 
