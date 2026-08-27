@@ -1,1586 +1,5 @@
-import base64
-import hashlib
-import hmac
-import html
-import io
-import json
-import math
-import os
-import re
-import secrets
-import shutil
-import subprocess
-import uuid
-import threading
-import tempfile
-import time
-import wave
-import zipfile
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Literal, Any
-from urllib.parse import unquote, urlparse, urlencode
-
-import psycopg
-import httpx
-from psycopg.rows import dict_row
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, RedirectResponse
-from cryptography.fernet import Fernet, InvalidToken
-from pydantic import BaseModel, Field
-from openai import OpenAI
-
-app = FastAPI(title="GPT Cyber Content API", version="0.51.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
-BASE_DIR = Path(__file__).resolve().parent
-INDEX_FILE = BASE_DIR / "index.html"
-MOBILE_JS = BASE_DIR / "mobile-download.js"
-NEWS_SEARCH_JS = BASE_DIR / "news-search.js"
-VISUAL_ALERT_JS = BASE_DIR / "visual-alert.js"
-LINKEDIN_JS = BASE_DIR / "linkedin.js"
-CYBER_SOURCES_FILE = BASE_DIR / "cyber_sources.json"
-AUTH_EXEMPT_PATHS = {"/health", "/auth/linkedin/callback"}
-
-class ContentRequest(BaseModel):
-    topic: str = Field(min_length=3, max_length=300)
-    domain: Literal["GRC", "Cybersecurity", "AI Governance", "Privacy"] = "GRC"
-    post_type: Literal["Carousel", "Infographic", "Single Post"] = "Carousel"
-    platform: Literal["Instagram", "LinkedIn", "Both"] = "Both"
-    audience: str = "Government and enterprise cybersecurity professionals"
-    language: Literal["Arabic", "English"] = "Arabic"
-    slides: int = Field(default=6, ge=1, le=10)
-    tone: str = "Professional, practical, executive-friendly"
-    use_web_search: bool = False
-
-class ImageRequest(BaseModel):
-    title: str
-    body: str = ""
-    slide_number: int = 1
-    post_type: Literal["Carousel", "Infographic", "Single Post"] = "Single Post"
-    domain: str = "GRC"
-    visual_style: Literal["GRC Professional", "Cyber Pulse", "Executive Minimal", "Infographic"] = "GRC Professional"
-    visual_direction: str = ""
-    variant_index: int = Field(default=1, ge=1, le=3)
-
-class NewsParseRequest(BaseModel):
-    title: str = Field(min_length=3, max_length=500)
-    news: str = Field(min_length=10, max_length=12000)
-
-class NewsSearchRequest(BaseModel):
-    days: int = Field(default=7, ge=1, le=30)
-    limit: int = Field(default=8, ge=1, le=12)
-
-class NewsVideoRequest(BaseModel):
-    headline: str = Field(min_length=3, max_length=500)
-    summary: str = Field(min_length=10, max_length=3000)
-    threat_type: str = Field(default="Ø®Ø¨Ø± Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ", max_length=200)
-    visual_brief: str = Field(default="", max_length=2000)
-    style: Literal["Breaking News", "Cyber Awareness", "GRC"] = "Breaking News"
-    duration: Literal[5, 10, 15] = 5
-
-class VisualAlertRequest(BaseModel):
-    title: str = Field(min_length=3, max_length=500)
-    content: str = Field(min_length=10, max_length=12000)
-    required_action: str = Field(min_length=3, max_length=4000)
-    visual_style: Literal["Auto", "Cinematic AI", "SOC Operations", "Executive GRC", "Cyber Awareness"] = "Cinematic AI"
-    threat_visual_style: Literal["Auto by Content", "Warning Screens", "Mobile Alerts", "System Errors and Updates", "Concerned User", "Anonymous Hacker", "Mixed Cyber Threats"] = "Auto by Content"
-    video_count: Literal[0, 1, 3] = 1
-
-class VisualIdeaRequest(BaseModel):
-    idea: str = Field(min_length=3, max_length=6000)
-
-class VisualApprovalRequest(BaseModel):
-    asset_order: list[str] = Field(default_factory=list, max_length=6)
-    motion_overlays: bool = False
-
-class VisualSaveRequest(BaseModel):
-    title: str = Field(min_length=3, max_length=500)
-    content: str = Field(min_length=10, max_length=12000)
-    required_action: str = Field(min_length=3, max_length=4000)
-    formatted_content: str = Field(default="", max_length=16000)
-
-class ArchivePost(BaseModel):
-    id: str | None = None
-    topic_id: int | None = None
-    topic: str
-    domain: str = "GRC"
-    post_type: str = "Carousel"
-    platform: str = "Both"
-    content: dict[str, Any]
-
-class LinkedInImage(BaseModel):
-    image_b64: str = Field(min_length=1, max_length=18_000_000)
-    image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
-    alt_text: str = Field(default="", max_length=120)
-
-class LinkedInPublishRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=3000)
-    image_b64: str = Field(default="", max_length=18_000_000)
-    image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
-    images: list[LinkedInImage] = Field(default_factory=list, max_length=20)
-
-class SupportingFileGenerateRequest(BaseModel):
-    post_id: str = Field(min_length=3, max_length=200)
-    post_title: str = Field(min_length=3, max_length=500)
-    post_text: str = Field(min_length=20, max_length=12000)
-    pillar: str = Field(default="GRC", max_length=200)
-    file_type: Literal["Ø¯Ù„ÙŠÙ„ Ø¹Ù…Ù„ÙŠ", "Ù‚Ø§Ø¦Ù…Ø© ØªØ­Ù‚Ù‚", "Ù…Ù„Ø®Øµ ØªÙ†ÙÙŠØ°ÙŠ", "Ù†Ù…ÙˆØ°Ø¬ Ø¹Ù…Ù„"] = "Ø¯Ù„ÙŠÙ„ Ø¹Ù…Ù„ÙŠ"
-
-class SupportingFileUpdateRequest(BaseModel):
-    title: str = Field(min_length=3, max_length=500)
-    content: str = Field(min_length=50, max_length=30000)
-
-def database_url(): return os.getenv("DATABASE_URL")
-
-VIDEO_JOBS: dict[str, dict[str, Any]] = {}
-VIDEO_JOBS_LOCK = threading.Lock()
-VISUAL_ALERT_JOBS: dict[str, dict[str, Any]] = {}
-VISUAL_ALERT_JOBS_LOCK = threading.Lock()
-def db_conn():
-    if not database_url(): raise HTTPException(503, "DATABASE_URL is not configured")
-    return psycopg.connect(database_url(), row_factory=dict_row)
-
-def load_cyber_sources():
-    try:
-        return json.loads(CYBER_SOURCES_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-def source_hosts():
-    hosts = set()
-    for src in load_cyber_sources():
-        host = urlparse(src.get("url", "")).hostname
-        if host:
-            hosts.add(host.lower().removeprefix("www."))
-    return hosts
-
-def url_is_approved(url: str):
-    try:
-        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
-        return any(host == allowed or host.endswith("." + allowed) for allowed in source_hosts())
-    except Exception:
-        return False
-
-def hash_password(password, salt=None):
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310000)
-    return base64.b64encode(salt).decode(), base64.b64encode(digest).decode()
-
-def verify_password(password, salt_b64, hash_b64):
-    try:
-        return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt_b64), 310000), base64.b64decode(hash_b64))
-    except Exception:
-        return False
-
-def init_db():
-    if not database_url(): return
-    with psycopg.connect(database_url()) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS posts(id TEXT PRIMARY KEY,topic_id INTEGER,topic TEXT NOT NULL,domain TEXT NOT NULL,post_type TEXT NOT NULL,platform TEXT NOT NULL,content JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_topic_id ON posts(topic_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)")
-        conn.execute("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,is_active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE TABLE IF NOT EXISTS visual_alert_archives(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,required_action TEXT NOT NULL,formatted_content TEXT NOT NULL DEFAULT '',drive_video_id TEXT,drive_video_url TEXT,drive_text_id TEXT,drive_text_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_visual_alert_archives_created_at ON visual_alert_archives(created_at DESC)")
-        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_connections(id TEXT PRIMARY KEY DEFAULT 'personal',member_id TEXT NOT NULL,member_name TEXT NOT NULL DEFAULT '',access_token_encrypted TEXT NOT NULL,expires_at TIMESTAMPTZ,connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_publications(id TEXT PRIMARY KEY,post_urn TEXT NOT NULL,post_url TEXT NOT NULL,has_image BOOLEAN NOT NULL DEFAULT FALSE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_supporting_files(id TEXT PRIMARY KEY,post_id TEXT NOT NULL,title TEXT NOT NULL,file_type TEXT NOT NULL,pillar TEXT NOT NULL DEFAULT 'GRC',content TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_linkedin_supporting_files_post ON linkedin_supporting_files(post_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_supporting_files_created ON linkedin_supporting_files(created_at DESC)")
-        conn.commit()
-
-def bootstrap_user():
-    if not database_url(): return
-    username = os.getenv("AUTH_BOOTSTRAP_USERNAME", "").strip()
-    password = os.getenv("AUTH_BOOTSTRAP_PASSWORD", "")
-    if not username or not password: return
-    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
-        if conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"] == 0:
-            salt, pwh = hash_password(password)
-            conn.execute("INSERT INTO users(id,username,password_salt,password_hash,is_active) VALUES(%s,%s,%s,%s,TRUE)", (str(uuid.uuid4()), username, salt, pwh))
-            conn.commit()
-
-def user_count():
-    if not database_url(): return 0
-    try:
-        with psycopg.connect(database_url(), row_factory=dict_row) as conn:
-            return conn.execute("SELECT COUNT(*) AS total FROM users WHERE is_active=TRUE").fetchone()["total"]
-    except Exception:
-        return 0
-
-def authenticate_basic(header):
-    if not header or not header.startswith("Basic "): return False
-    try:
-        username, password = base64.b64decode(header.split(" ", 1)[1]).decode().split(":", 1)
-        with psycopg.connect(database_url(), row_factory=dict_row) as conn:
-            u = conn.execute("SELECT * FROM users WHERE username=%s", (username,)).fetchone()
-        return bool(u and u["is_active"] and verify_password(password, u["password_salt"], u["password_hash"]))
-    except Exception:
-        return False
-
-@app.middleware("http")
-async def auth(request: Request, call_next):
-    if request.url.path in AUTH_EXEMPT_PATHS: return await call_next(request)
-    if not database_url(): return JSONResponse({"detail":"DATABASE_URL is not configured"}, status_code=503)
-    if user_count() == 0: return JSONResponse({"detail":"No active users found. Set AUTH_BOOTSTRAP_USERNAME and AUTH_BOOTSTRAP_PASSWORD in Railway Variables, then redeploy."}, status_code=503)
-    if not authenticate_basic(request.headers.get("Authorization")):
-        return Response(status_code=401, headers={"WWW-Authenticate":"Basic realm=\"GPT Cyber Content\", charset=\"UTF-8\""})
-    return await call_next(request)
-
-@app.on_event("startup")
-def startup():
-    try: init_db(); bootstrap_user()
-    except Exception as e: print("Database startup warning:", e)
-
-def extract_json(text):
-    cleaned = re.sub(r"^```json\s*|^```\s*|\s*```$", "", text.strip(), flags=re.I|re.S)
-    return json.loads(cleaned)
-
-@app.get("/", include_in_schema=False)
-def web_app(): return FileResponse(INDEX_FILE, media_type="text/html")
-
-@app.get("/mobile-download.js", include_in_schema=False)
-def mobile_js():
-    base = MOBILE_JS.read_text(encoding="utf-8") if MOBILE_JS.exists() else ""
-    search = NEWS_SEARCH_JS.read_text(encoding="utf-8") if NEWS_SEARCH_JS.exists() else ""
-    visual_alert = VISUAL_ALERT_JS.read_text(encoding="utf-8") if VISUAL_ALERT_JS.exists() else ""
-    linkedin = LINKEDIN_JS.read_text(encoding="utf-8") if LINKEDIN_JS.exists() else ""
-    return Response(content=base + "\n\n" + search + "\n\n" + visual_alert + "\n\n" + linkedin, media_type="application/javascript", headers={"Cache-Control":"no-store, max-age=0"})
-
-@app.get("/health")
-def health():
-    return {
-        "status":"ok", "version":"0.51.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
-        "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
-        "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
-        "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
-        "database_connected":bool(database_url()), "active_users":user_count(), "google_drive_configured":all(os.getenv(key) for key in ("GOOGLE_DRIVE_CLIENT_ID","GOOGLE_DRIVE_CLIENT_SECRET","GOOGLE_DRIVE_REFRESH_TOKEN")), "news_parser":"source-date-verified-v4",
-        "news_artwork":"two-line-cve-layout-v12", "news_search":"approved-sources-v1", "news_sources":len(load_cyber_sources()),
-        "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
-        "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
-        "visual_alert_editor":"fixed-brand-outro-v24", "brand_outro":True, "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
-        "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
-    }
-
-def _linkedin_config():
-    client_id = os.getenv("LINKEDIN_CLIENT_ID", "").strip()
-    client_secret = os.getenv("LINKEDIN_CLIENT_SECRET", "").strip()
-    redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "").strip()
-    if not all((client_id, client_secret, redirect_uri)):
-        raise HTTPException(503, "Ø£Ø¶Ù LINKEDIN_CLIENT_ID ÙˆLINKEDIN_CLIENT_SECRET ÙˆLINKEDIN_REDIRECT_URI ÙÙŠ Railway")
-    return client_id, client_secret, redirect_uri
-
-def _linkedin_fernet():
-    _, secret, _ = _linkedin_config()
-    key = base64.urlsafe_b64encode(hashlib.sha256(("cyberpulse-linkedin:" + secret).encode()).digest())
-    return Fernet(key)
-
-def _linkedin_token():
-    with db_conn() as c:
-        row = c.execute("SELECT * FROM linkedin_connections WHERE id='personal'").fetchone()
-    if not row: raise HTTPException(409, "Ø­Ø³Ø§Ø¨ LinkedIn ØºÙŠØ± Ù…ØªØµÙ„")
-    if row.get("expires_at") and row["expires_at"] <= datetime.now(timezone.utc):
-        raise HTTPException(401, "Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØ© Ø±Ø¨Ø· LinkedIn. Ø£Ø¹Ø¯ Ø§Ù„Ø§ØªØµØ§Ù„ Ø¨Ø§Ù„Ø­Ø³Ø§Ø¨")
-    try: return _linkedin_fernet().decrypt(row["access_token_encrypted"].encode()).decode(), row
-    except InvalidToken: raise HTTPException(500, "ØªØ¹Ø°Ø± Ù‚Ø±Ø§Ø¡Ø© Ø§ØªØµØ§Ù„ LinkedIn. Ø£Ø¹Ø¯ Ø±Ø¨Ø· Ø§Ù„Ø­Ø³Ø§Ø¨")
-
-@app.get("/auth/linkedin/start")
-def linkedin_start():
-    client_id, secret, redirect_uri = _linkedin_config()
-    issued = str(int(time.time()))
-    nonce = secrets.token_urlsafe(18)
-    payload = issued + "." + nonce
-    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    state = base64.urlsafe_b64encode((payload + "." + signature).encode()).decode().rstrip("=")
-    query = urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"state":state,"scope":"openid profile w_member_social"})
-    return RedirectResponse("https://www.linkedin.com/oauth/v2/authorization?" + query)
-
-@app.get("/auth/linkedin/callback")
-def linkedin_callback(code: str = "", state: str = "", error: str = ""):
-    if error: return RedirectResponse("/#linkedin?linkedin=denied")
-    client_id, secret, redirect_uri = _linkedin_config()
-    try:
-        decoded = base64.urlsafe_b64decode(state + "=" * (-len(state) % 4)).decode()
-        issued, nonce, signature = decoded.split(".", 2)
-        expected = hmac.new(secret.encode(), f"{issued}.{nonce}".encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected) or abs(int(time.time()) - int(issued)) > 900: raise ValueError()
-    except Exception: raise HTTPException(400, "Ø­Ø§Ù„Ø© OAuth ØºÙŠØ± ØµØ§Ù„Ø­Ø© Ø£Ùˆ Ù…Ù†ØªÙ‡ÙŠØ©")
-    if not code: raise HTTPException(400, "Ù„Ù… ÙŠÙØ±Ø¬Ø¹ LinkedIn Ø±Ù…Ø² Ø§Ù„ØªÙÙˆÙŠØ¶")
-    with httpx.Client(timeout=40) as client:
-        token_response = client.post("https://www.linkedin.com/oauth/v2/accessToken", data={"grant_type":"authorization_code","code":code,"redirect_uri":redirect_uri,"client_id":client_id,"client_secret":secret})
-        if token_response.status_code >= 400: raise HTTPException(502, f"ØªØ¹Ø°Ø± Ø§Ù„Ø­ØµÙˆÙ„ Ø¹Ù„Ù‰ Ø±Ù…Ø² LinkedIn: {token_response.text[:500]}")
-        token_data = token_response.json(); token = token_data.get("access_token", "")
-        profile_response = client.get("https://api.linkedin.com/v2/userinfo", headers={"Authorization":f"Bearer {token}"})
-        if profile_response.status_code >= 400: raise HTTPException(502, f"ØªØ¹Ø°Ø± Ù‚Ø±Ø§Ø¡Ø© Ø­Ø³Ø§Ø¨ LinkedIn: {profile_response.text[:500]}")
-        profile = profile_response.json()
-    member_id = str(profile.get("sub", "")).strip()
-    if not token or not member_id: raise HTTPException(502, "Ù„Ù… ÙŠÙØ±Ø¬Ø¹ LinkedIn Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø³Ø§Ø¨ ÙƒØ§Ù…Ù„Ø©")
-    expires_at = datetime.fromtimestamp(time.time() + int(token_data.get("expires_in", 5184000)), timezone.utc)
-    encrypted = _linkedin_fernet().encrypt(token.encode()).decode()
-    name = str(profile.get("name") or "Ø­Ø³Ø§Ø¨ LinkedIn")[:300]
-    with db_conn() as c:
-        c.execute("INSERT INTO linkedin_connections(id,member_id,member_name,access_token_encrypted,expires_at) VALUES('personal',%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET member_id=EXCLUDED.member_id,member_name=EXCLUDED.member_name,access_token_encrypted=EXCLUDED.access_token_encrypted,expires_at=EXCLUDED.expires_at,updated_at=NOW()", (member_id,name,encrypted,expires_at)); c.commit()
-    return RedirectResponse("/#linkedin?linkedin=connected")
-
-@app.get("/api/linkedin/status")
-def linkedin_status():
-    configured = all(os.getenv(k) for k in ("LINKEDIN_CLIENT_ID","LINKEDIN_CLIENT_SECRET","LINKEDIN_REDIRECT_URI"))
-    if not configured: return {"configured":False,"connected":False}
-    with db_conn() as c: row = c.execute("SELECT member_name,expires_at,connected_at FROM linkedin_connections WHERE id='personal'").fetchone()
-    connected = bool(row and (not row["expires_at"] or row["expires_at"] > datetime.now(timezone.utc)))
-    return {"configured":True,"connected":connected,"member_name":row["member_name"] if row else "","expires_at":row["expires_at"] if row else None}
-
-@app.post("/api/linkedin/disconnect")
-def linkedin_disconnect():
-    with db_conn() as c: c.execute("DELETE FROM linkedin_connections WHERE id='personal'"); c.commit()
-    return {"disconnected":True}
-
-def _linkedin_rtl_text(text: str):
-    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    if not re.search(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]", normalized):
-        return normalized
-    return "\n".join(
-        line if not line.strip() or line.startswith("\u200f") else "\u200f" + line
-        for line in normalized.split("\n")
-    )
-
-@app.post("/api/linkedin/publish")
-def linkedin_publish(req: LinkedInPublishRequest):
-    post_text = _linkedin_rtl_text(req.text)
-    if len(post_text) > 3000:
-        raise HTTPException(400, f"Ø§Ù„Ù†Øµ ÙŠØªØ¬Ø§ÙˆØ² Ø­Ø¯ LinkedIn Ø¨Ù…Ù‚Ø¯Ø§Ø± {len(post_text) - 3000} Ø­Ø±ÙÙ‹Ø§ Ø¨Ø¹Ø¯ Ø¶Ø¨Ø· Ø§Ù„Ø§ØªØ¬Ø§Ù‡. Ø§Ø®ØªØµØ±Ù‡ Ù‚Ø¨Ù„ Ø§Ù„Ù†Ø´Ø±.")
-    token, connection = _linkedin_token()
-    author = "urn:li:person:" + connection["member_id"]
-    headers = {"Authorization":f"Bearer {token}","Linkedin-Version":os.getenv("LINKEDIN_API_VERSION", "202608"),"X-Restli-Protocol-Version":"2.0.0","Content-Type":"application/json"}
-    content = None
-    images = list(req.images)
-    if not images and req.image_b64:
-        images.append(LinkedInImage(image_b64=req.image_b64, image_mime_type=req.image_mime_type))
-    uploaded_images = []
-    with httpx.Client(timeout=120) as client:
-        for index, image in enumerate(images, 1):
-            try: image_bytes = base64.b64decode(image.image_b64, validate=True)
-            except Exception: raise HTTPException(400, f"Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„ØµÙˆØ±Ø© {index} ØºÙŠØ± ØµØ§Ù„Ø­Ø©")
-            if len(image_bytes) > 10 * 1024 * 1024: raise HTTPException(413, f"Ø­Ø¬Ù… Ø§Ù„ØµÙˆØ±Ø© {index} ÙŠØªØ¬Ø§ÙˆØ² 10 MB")
-            init = client.post("https://api.linkedin.com/rest/images?action=initializeUpload", headers=headers, json={"initializeUploadRequest":{"owner":author}})
-            if init.status_code >= 400: raise HTTPException(init.status_code, f"ØªØ¹Ø°Ø± ØªÙ‡ÙŠØ¦Ø© ØµÙˆØ±Ø© LinkedIn Ø±Ù‚Ù… {index}: {init.text[:700]}")
-            value = init.json().get("value", {}); upload_url = value.get("uploadUrl"); image_urn = value.get("image")
-            if not upload_url or not image_urn: raise HTTPException(502, f"Ù„Ù… ÙŠÙØ±Ø¬Ø¹ LinkedIn Ø±Ø§Ø¨Ø· Ø±ÙØ¹ Ø§Ù„ØµÙˆØ±Ø© {index}")
-            upload = client.put(upload_url, content=image_bytes, headers={"Content-Type":image.image_mime_type})
-            if upload.status_code >= 400: raise HTTPException(upload.status_code, f"ØªØ¹Ø°Ø± Ø±ÙØ¹ ØµÙˆØ±Ø© LinkedIn Ø±Ù‚Ù… {index}: {upload.text[:500]}")
-            item = {"id":image_urn}
-            if image.alt_text: item["altText"] = image.alt_text
-            uploaded_images.append(item)
-        if len(uploaded_images) == 1:
-            content = {"media":{"title":"Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ | CYBER PULSE","id":uploaded_images[0]["id"]}}
-        elif len(uploaded_images) > 1:
-            content = {"multiImage":{"images":uploaded_images}}
-        body = {"author":author,"commentary":post_text,"visibility":"PUBLIC","distribution":{"feedDistribution":"MAIN_FEED","targetEntities":[],"thirdPartyDistributionChannels":[]},"lifecycleState":"PUBLISHED","isReshareDisabledByAuthor":False}
-        if content: body["content"] = content
-        response = client.post("https://api.linkedin.com/rest/posts", headers=headers, json=body)
-    if response.status_code >= 400: raise HTTPException(response.status_code, f"ÙØ´Ù„ Ø§Ù„Ù†Ø´Ø± Ø¹Ù„Ù‰ LinkedIn: {response.text[:900]}")
-    post_urn = response.headers.get("x-restli-id", "")
-    post_url = "https://www.linkedin.com/feed/update/" + post_urn + "/" if post_urn else "https://www.linkedin.com/feed/"
-    with db_conn() as c:
-        c.execute("INSERT INTO linkedin_publications(id,post_urn,post_url,has_image) VALUES(%s,%s,%s,%s)", (str(uuid.uuid4()),post_urn,post_url,bool(content))); c.commit()
-    return {"published":True,"post_urn":post_urn,"post_url":post_url,"image_count":len(uploaded_images)}
-
-def _supporting_file_fallback(req: SupportingFileGenerateRequest):
-    practical = [line.strip(" -â€¢\t") for line in req.post_text.splitlines() if line.strip().startswith(("â€¢", "-"))]
-    practical = practical[:7] or ["Ø­Ø¯Ù‘Ø¯ Ù…Ø§Ù„ÙƒÙ‹Ø§ ÙˆØ§Ø¶Ø­Ù‹Ø§ Ù„ÙƒÙ„ Ø¥Ø¬Ø±Ø§Ø¡ ÙˆÙ…ÙˆØ¹Ø¯Ù‹Ø§ Ù…Ø³ØªÙ‡Ø¯ÙÙ‹Ø§ Ù„Ù„ØªÙ†ÙÙŠØ°.", "Ø§Ø±Ø¨Ø· Ø§Ù„Ù‚Ø±Ø§Ø± Ø¨Ø§Ù„Ù…Ø®Ø§Ø·Ø± ÙˆØ§Ù„Ø£Ø«Ø± Ø§Ù„Ù…ØªÙˆÙ‚Ø¹ Ø¹Ù„Ù‰ Ø§Ù„Ø¹Ù…Ù„.", "ÙˆØ«Ù‘Ù‚ Ø§Ù„Ø£Ø¯Ù„Ø© ÙˆØ§Ù„Ù†ØªØ§Ø¦Ø¬ØŒ Ø«Ù… Ø±Ø§Ø¬Ø¹ Ø§Ù„ØªÙ‚Ø¯Ù… Ø¨ØµÙˆØ±Ø© Ø¯ÙˆØ±ÙŠØ©."]
-    return "\n".join([f"# {req.post_title}", "## Ø§Ù„Ù‡Ø¯Ù Ù…Ù† Ø§Ù„Ù…Ù„Ù", "ÙŠØ­ÙˆÙ‘Ù„ Ù‡Ø°Ø§ Ø§Ù„Ù…Ù„Ù ÙÙƒØ±Ø© Ø§Ù„Ù…Ù†Ø´ÙˆØ± Ø¥Ù„Ù‰ Ø®Ø·ÙˆØ§Øª Ø¹Ù…Ù„ÙŠØ© Ù‚Ø§Ø¨Ù„Ø© Ù„Ù„Ù…Ø±Ø§Ø¬Ø¹Ø© ÙˆØ§Ù„ØªØ·Ø¨ÙŠÙ‚ Ø¯Ø§Ø®Ù„ Ø§Ù„Ù…Ø¤Ø³Ø³Ø©.", "## Ù„Ù…Ù† Ø£ÙØ¹Ø¯ Ù‡Ø°Ø§ Ø§Ù„Ù…Ù„ÙØŸ", "Ù„Ù‚ÙŠØ§Ø¯Ø§Øª Ø§Ù„Ø£Ù…Ù† Ø§Ù„Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ ÙˆØ§Ù„Ø­ÙˆÙƒÙ…Ø© ÙˆØ¥Ø¯Ø§Ø±Ø© Ø§Ù„Ù…Ø®Ø§Ø·Ø± ÙˆÙ…Ø§Ù„ÙƒÙŠ Ø§Ù„Ø®Ø¯Ù…Ø§Øª ÙˆØ§Ù„Ø¹Ù…Ù„ÙŠØ§Øª.", "## Ø®Ø·ÙˆØ§Øª Ø§Ù„ØªØ·Ø¨ÙŠÙ‚", *[f"- {item}" for item in practical], "## Ø£Ø³Ø¦Ù„Ø© Ø§Ù„Ù…Ø±Ø§Ø¬Ø¹Ø©", "- Ù‡Ù„ Ù†Ø·Ø§Ù‚ Ø§Ù„Ù…ÙˆØ¶ÙˆØ¹ ÙˆØ§Ù„Ù‚Ø±Ø§Ø± Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ Ù…Ø­Ø¯Ø¯Ø§Ù† Ø¨ÙˆØ¶ÙˆØ­ØŸ", "- Ù‡Ù„ ÙŠÙˆØ¬Ø¯ Ù…Ø§Ù„Ùƒ ØªÙ†ÙÙŠØ°ÙŠ ÙˆÙ…Ø¤Ø´Ø± Ù„Ù‚ÙŠØ§Ø³ Ø§Ù„ØªÙ‚Ø¯Ù…ØŸ", "- Ù‡Ù„ ØªÙ… ØªÙˆØ«ÙŠÙ‚ Ø§Ù„Ù…Ø®Ø§Ø·Ø± ÙˆØ§Ù„Ø§Ø¹ØªÙ…Ø§Ø¯ ÙˆØ§Ù„Ø§Ø³ØªØ«Ù†Ø§Ø¡Ø§ØªØŸ", "## Ø§Ù„Ù…Ø®Ø±Ø¬ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨", "Ù‚Ø±Ø§Ø± Ù…ÙˆØ«Ù‚ØŒ ÙˆØ®Ø·Ø© ØªÙ†ÙÙŠØ° Ù…Ø­Ø¯Ø¯Ø© Ø§Ù„Ù…Ø³Ø¤ÙˆÙ„ÙŠØ§Øª ÙˆØ§Ù„Ù…ÙˆØ§Ø¹ÙŠØ¯ØŒ ÙˆØ¢Ù„ÙŠØ© Ù…ØªØ§Ø¨Ø¹Ø© Ù‚Ø§Ø¨Ù„Ø© Ù„Ù„Ù‚ÙŠØ§Ø³.", "## ØªÙ†Ø¨ÙŠÙ‡ Ù…Ù‡Ù†ÙŠ", "Ù‡Ø°Ø§ Ø§Ù„Ù…Ù„Ù Ø¥Ø±Ø´Ø§Ø¯ÙŠ ÙˆÙŠØ¬Ø¨ ØªÙƒÙŠÙŠÙÙ‡ Ù…Ø¹ Ø³ÙŠØ§Ø³Ø§Øª Ø§Ù„Ù…Ø¤Ø³Ø³Ø© ÙˆÙ…ØªØ·Ù„Ø¨Ø§ØªÙ‡Ø§ Ø§Ù„ØªÙ†Ø¸ÙŠÙ…ÙŠØ© ÙˆØ´Ù‡ÙŠØ© Ø§Ù„Ù…Ø®Ø§Ø·Ø± Ø§Ù„Ù…Ø¹ØªÙ…Ø¯Ø©."])
-
-def _generate_supporting_file_content(req: SupportingFileGenerateRequest):
-    if not os.getenv("OPENAI_API_KEY"): return _supporting_file_fallback(req)
-    prompt = f'''Ø£Ù†Øª Ù…Ø³ØªØ´Ø§Ø± Ø£Ù…Ù† Ù…Ø¹Ù„ÙˆÙ…Ø§Øª ÙˆØ­ÙˆÙƒÙ…Ø© Ù…Ø¤Ø³Ø³ÙŠØ©. Ø£Ù†Ø´Ø¦ Ù…Ù„ÙÙ‹Ø§ Ø¯Ø§Ø¹Ù…Ù‹Ø§ Ø¹Ø±Ø¨ÙŠÙ‹Ø§ Ø§Ø­ØªØ±Ø§ÙÙŠÙ‹Ø§ Ù…Ù† Ù†ÙˆØ¹: {req.file_type}.
-Ø§Ù„Ù…ÙˆØ¶ÙˆØ¹: {req.post_title}
-Ø§Ù„Ù…Ø¬Ø§Ù„: {req.pillar}
-Ù†Øµ Ù…Ù†Ø´ÙˆØ± LinkedIn Ø§Ù„Ù…ØµØ¯Ø±:
-{req.post_text}
-
-Ø§Ø³ØªØ®Ø¯Ù… ÙÙ‚Ø· Ø§Ù„Ø£ÙÙƒØ§Ø± Ø§Ù„Ù…Ø¯Ø¹ÙˆÙ…Ø© ÙÙŠ Ø§Ù„Ù…Ù†Ø´ÙˆØ±ØŒ ÙˆÙ„Ø§ ØªØ®ØªØ±Ø¹ Ø£Ø±Ù‚Ø§Ù…Ù‹Ø§ Ø£Ùˆ Ù‚ÙˆØ§Ù†ÙŠÙ† Ø£Ùˆ Ù…Ø¹Ø§ÙŠÙŠØ± Ø£Ùˆ Ù…Ø±Ø§Ø¬Ø¹. Ø­ÙˆÙ‘Ù„ Ø§Ù„Ù…Ù†Ø´ÙˆØ± Ø¥Ù„Ù‰ Ù‚ÙŠÙ…Ø© Ø¹Ù…Ù„ÙŠØ© Ø£Ø¹Ù…Ù‚ Ø¯ÙˆÙ† ØªÙƒØ±Ø§Ø±Ù‡ Ø­Ø±ÙÙŠÙ‹Ø§.
-Ø£Ø¹Ø¯ Markdown Ø¹Ø±Ø¨ÙŠÙ‹Ø§ ÙÙ‚Ø·ØŒ Ù…Ù† 700 Ø¥Ù„Ù‰ 1200 ÙƒÙ„Ù…Ø©ØŒ ÙŠØ¨Ø¯Ø£ Ø¨Ø¹Ù†ÙˆØ§Ù† # ÙˆØ§Ø­Ø¯ØŒ Ø«Ù… Ø£Ù‚Ø³Ø§Ù… ## Ù‚ØµÙŠØ±Ø© ÙˆÙˆØ§Ø¶Ø­Ø©. Ø£Ø¶Ù Ø­Ø³Ø¨ Ù…Ù„Ø§Ø¡Ù…Ø© Ø§Ù„Ù†ÙˆØ¹: Ø§Ù„Ù‡Ø¯ÙØŒ Ø§Ù„Ø¬Ù…Ù‡ÙˆØ±ØŒ Ø·Ø±ÙŠÙ‚Ø© Ø§Ù„Ø§Ø³ØªØ®Ø¯Ø§Ù…ØŒ Ø®Ø·ÙˆØ§Øª Ø¹Ù…Ù„ÙŠØ©ØŒ Ù‚Ø§Ø¦Ù…Ø© ØªØ­Ù‚Ù‚ØŒ Ø£Ø³Ø¦Ù„Ø© Ù‚Ø±Ø§Ø±ØŒ Ù…Ø®Ø±Ø¬Ø§Øª Ù…ØªÙˆÙ‚Ø¹Ø©ØŒ ÙˆØªÙ†Ø¨ÙŠÙ‡ Ù…Ù‡Ù†ÙŠ. Ø§Ø³ØªØ®Ø¯Ù… Ù‚ÙˆØ§Ø¦Ù… ØªØ¨Ø¯Ø£ Ø¨Ù€ - Ø¹Ù†Ø¯ Ø§Ù„Ø­Ø§Ø¬Ø©. Ù„Ø§ ØªØ¶Ù Ù‡Ø§Ø´ØªØ§Ù‚Ø§Øª Ø£Ùˆ Ø¯Ø¹ÙˆØ© ØªØ³ÙˆÙŠÙ‚ÙŠØ© Ø£Ùˆ Ù…Ø¹Ù„ÙˆÙ…Ø§Øª ØªÙˆØ§ØµÙ„.'''
-    result = OpenAI(api_key=os.getenv("OPENAI_API_KEY")).responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False)
-    content = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", result.output_text.strip(), flags=re.I|re.S)
-    if len(content) < 200: raise HTTPException(502, "Ù„Ù… ÙŠÙØ±Ø¬Ø¹ Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ Ù…Ø­ØªÙˆÙ‰ ÙƒØ§ÙÙŠÙ‹Ø§ Ù„Ù„Ù…Ù„Ù Ø§Ù„Ø¯Ø§Ø¹Ù…")
-    return content
-
-@app.get("/api/linkedin/supporting-files")
-def linkedin_supporting_files():
-    with db_conn() as c: return c.execute("SELECT id,post_id,title,file_type,pillar,content,created_at,updated_at FROM linkedin_supporting_files ORDER BY created_at DESC LIMIT 100").fetchall()
-
-@app.post("/api/linkedin/supporting-files")
-def linkedin_supporting_file_generate(req: SupportingFileGenerateRequest):
-    content = _generate_supporting_file_content(req)
-    title = next((line.lstrip("# ").strip() for line in content.splitlines() if line.startswith("# ")), req.post_title)
-    file_id = str(uuid.uuid4())
-    with db_conn() as c:
-        existing = c.execute("SELECT id FROM linkedin_supporting_files WHERE post_id=%s", (req.post_id,)).fetchone()
-        if existing:
-            file_id = existing["id"]
-            c.execute("UPDATE linkedin_supporting_files SET title=%s,file_type=%s,pillar=%s,content=%s,updated_at=NOW() WHERE id=%s", (title,req.file_type,req.pillar,content,file_id))
-        else: c.execute("INSERT INTO linkedin_supporting_files(id,post_id,title,file_type,pillar,content) VALUES(%s,%s,%s,%s,%s,%s)", (file_id,req.post_id,title,req.file_type,req.pillar,content))
-        c.commit()
-    return {"id":file_id,"post_id":req.post_id,"title":title,"file_type":req.file_type,"pillar":req.pillar,"content":content}
-
-@app.put("/api/linkedin/supporting-files/{file_id}")
-def linkedin_supporting_file_update(file_id: str, req: SupportingFileUpdateRequest):
-    with db_conn() as c: cur = c.execute("UPDATE linkedin_supporting_files SET title=%s,content=%s,updated_at=NOW() WHERE id=%s", (req.title,req.content,file_id)); c.commit()
-    if not cur.rowcount: raise HTTPException(404, "Ø§Ù„Ù…Ù„Ù Ø§Ù„Ø¯Ø§Ø¹Ù… ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯")
-    return {"saved":True,"id":file_id}
-
-@app.delete("/api/linkedin/supporting-files/{file_id}")
-def linkedin_supporting_file_delete(file_id: str):
-    with db_conn() as c: cur = c.execute("DELETE FROM linkedin_supporting_files WHERE id=%s", (file_id,)); c.commit()
-    return {"deleted":bool(cur.rowcount)}
-
-def _supporting_pdf(record):
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.colors import HexColor
-    from reportlab.lib.utils import ImageReader
-    from PIL import Image, ImageDraw, ImageFont
-    font_path = BASE_DIR / "assets" / "fonts" / "Cairo.ttf"
-    if not font_path.exists(): raise HTTPException(500, "Ø®Ø· Cairo ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯ ÙÙŠ Ø§Ù„Ø®Ø§Ø¯Ù…")
-    out = io.BytesIO(); width, height = A4; c = canvas.Canvas(out, pagesize=A4, pageCompression=1)
-    navy, cyan, ink, muted, pale = map(HexColor, ("#071827","#18C7C2","#102B45","#567086","#F2F7FA"))
-    margin, right, y, page = 44, width-44, height-116, 0
-    scale=3
-    font_cache={}
-    measure_draw=ImageDraw.Draw(Image.new("RGBA",(2,2)))
-    def pil_font(size):
-        key=int(size*scale)
-        if key not in font_cache: font_cache[key]=ImageFont.truetype(str(font_path),key)
-        return font_cache[key]
-    def text_width(value,size): return measure_draw.textlength(str(value),font=pil_font(size),direction="rtl",language="ar")/scale
-    def draw_rtl(value,x_right,y_baseline,size,color):
-        value=str(value); font=pil_font(size); box=measure_draw.textbbox((0,0),value,font=font,direction="rtl",language="ar",stroke_width=0)
-        px_w=max(2,box[2]-box[0]+10*scale); px_h=max(2,box[3]-box[1]+6*scale)
-        image=Image.new("RGBA",(px_w,px_h),(255,255,255,0)); draw=ImageDraw.Draw(image)
-        if color.startswith("0x"): color="#"+color[2:]
-        rgb=tuple(int(color[i:i+2],16) for i in (1,3,5))+(255,)
-        draw.text((px_w-4*scale,-box[1]+2*scale),value,font=font,fill=rgb,anchor="ra",direction="rtl",language="ar")
-        pt_w,pt_h=px_w/scale,px_h/scale
-        c.drawImage(ImageReader(image),x_right-pt_w,y_baseline-(pt_h*.72),width=pt_w,height=pt_h,mask="auto")
-    def page_start():
-        nonlocal y,page; page+=1; c.setFillColor(navy); c.rect(0,height-78,width,78,stroke=0,fill=1); c.setStrokeColor(cyan); c.setLineWidth(3); c.line(margin,height-78,right,height-78); draw_rtl("Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ",right,height-34,17,"#18C7C2"); draw_rtl("Ù…Ø¹Ù„ÙˆÙ…Ø© Ù…ÙˆØ«ÙˆÙ‚Ø© .. ÙˆØ­Ù…Ø§ÙŠØ© ØªØ¨Ø¯Ø£ Ø¨Ø§Ù„ÙˆØ¹ÙŠ",right,height-55,8.5,"#D7FFFF"); c.setFillColor(muted); c.setFont("Helvetica",8); c.drawString(margin,24,f"CYBER PULSE  |  {page}"); y=height-112
-    def ensure(space):
-        nonlocal y
-        if y-space<48: c.showPage(); page_start()
-    def logical_wrap(text,size,max_width):
-        words=str(text).split(); lines=[]; line=""
-        for word in words:
-            test=f"{line} {word}".strip()
-            if line and text_width(test,size)>max_width: lines.append(line); line=word
-            else: line=test
-        if line: lines.append(line)
-        return lines
-    def block(text,size=10.5,color=ink,leading=18,bullet=False):
-        nonlocal y
-        lines=logical_wrap(text,size,right-margin-(18 if bullet else 0)); ensure(max(leading,len(lines)*leading+6))
-        for i,line in enumerate(lines):
-            draw_rtl(line,right-(18 if bullet else 0),y,size,color.hexval())
-            if bullet and i==0: c.setFillColor(cyan); c.circle(right-6,y+3,2.7,stroke=0,fill=1); c.setFillColor(color)
-            y-=leading
-        y-=5
-    page_start()
-    for raw in record["content"].splitlines():
-        line=raw.strip()
-        if not line: y-=6; continue
-        if line.startswith("# "): ensure(85); c.setFillColor(pale); c.roundRect(margin,y-58,right-margin,72,10,stroke=0,fill=1); block(line[2:],18,navy,25); y-=10
-        elif line.startswith("## "): ensure(48); y-=5; block(line[3:],13.5,HexColor("#087F82"),22); c.setStrokeColor(HexColor("#C7E8E7")); c.line(margin,y+5,right,y+5); y-=7
-        elif line.startswith(("- ","â€¢ ")): block(line[2:],10.2,ink,18,bullet=True)
-        else: block(line,10.5,ink,18)
-    c.save(); out.seek(0); return out.getvalue()
-
-@app.get("/api/linkedin/supporting-files/{file_id}/pdf")
-def linkedin_supporting_file_pdf(file_id: str):
-    with db_conn() as c: record = c.execute("SELECT id,title,content FROM linkedin_supporting_files WHERE id=%s", (file_id,)).fetchone()
-    if not record: raise HTTPException(404, "Ø§Ù„Ù…Ù„Ù Ø§Ù„Ø¯Ø§Ø¹Ù… ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯")
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", record["title"]).strip("-")[:60] or "cyber-pulse-supporting-file"
-    return Response(_supporting_pdf(record), media_type="application/pdf", headers={"Content-Disposition":f'attachment; filename="{safe}.pdf"',"Cache-Control":"no-store"})
-
-def _visual_job_update(job_id: str, **values):
-    with VISUAL_ALERT_JOBS_LOCK:
-        if job_id in VISUAL_ALERT_JOBS: VISUAL_ALERT_JOBS[job_id].update(values)
-
-@app.post("/api/visual-alert/analyze-idea")
-def analyze_visual_alert_idea(req: VisualIdeaRequest):
-    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
-    prompt = f'''You are the Arabic content strategist for a UAE cybersecurity awareness channel.
-Turn the user's rough idea into editable input fields for a vertical awareness segment of 32-44 seconds; a fixed 10-second branded outro is appended later.
-Write clear Modern Standard Arabic suitable for UAE government and enterprise audiences. Keep the tone practical, calm, concise and human-centered.
-Do not invent CVEs, dates, vendors, incidents, statistics, laws, exploitation claims, product versions or technical facts that the user did not supply. If the idea is general awareness, develop it using durable best practices without pretending a specific incident occurred.
-The content must be 70-105 Arabic words and explain the issue, why it matters, and the safe behavior. End the content with a short final paragraph beginning exactly with "Ø§Ù„Ø®Ù„Ø§ØµØ©:" that gives one memorable practical takeaway. The required_action must contain 3-5 short actionable lines separated by newlines, with no numbering or Markdown. The title must be compelling but factual, maximum 10 words.
-Choose visual_style from exactly: Cinematic AI, Auto, SOC Operations, Executive GRC, Cyber Awareness. Prefer Cyber Awareness for personal behavior, families, phishing, passwords, social media or AI-use topics; Executive GRC for governance and management; SOC Operations only for genuinely technical operational incidents; otherwise Cinematic AI.
-Return ONLY valid JSON with: title, content, required_action, visual_style.
-
-USER IDEA:
-{req.idea}'''
-    try:
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        data = extract_json(client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text)
-        allowed_styles = {"Cinematic AI", "Auto", "SOC Operations", "Executive GRC", "Cyber Awareness"}
-        title = " ".join(str(data.get("title", "")).split())[:500]
-        content = str(data.get("content", "")).strip()[:12000]
-        required_action = str(data.get("required_action", "")).strip()[:4000]
-        if len(title) < 3 or len(content) < 10 or len(required_action) < 3: raise ValueError("Ù„Ù… ØªÙƒØªÙ…Ù„ Ø§Ù„Ø­Ù‚ÙˆÙ„ Ø§Ù„Ù…Ù‚ØªØ±Ø­Ø©")
-        style = str(data.get("visual_style", "Cinematic AI"))
-        return {"title":title, "content":content, "required_action":required_action, "visual_style":style if style in allowed_styles else "Cinematic AI"}
-    except Exception as exc:
-        raise HTTPException(500, f"ØªØ¹Ø°Ø± ØªØ­Ù„ÙŠÙ„ Ø§Ù„ÙÙƒØ±Ø©: {str(exc)[:700]}")
-
-@app.post("/api/visual-alert/social-copy")
-def create_visual_alert_social_copy(req: VisualAlertRequest):
-    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
-    prompt = f'''You format Arabic cybersecurity content for LinkedIn and Instagram.
-Use ONLY the supplied title, content and required actions. Never invent statistics, dates, standards, CVEs, vendors, incidents, claims, recommendations or facts.
-Create one polished plain-text Arabic post ready to paste, following this exact visual rhythm:
-1. First line: one relevant emoji followed by the factual title.
-2. One or two short explanatory paragraphs with intentional line breaks.
-3. A short section label appropriate to the content, followed by each supplied action on its own line. Use number-keycap emojis 1ï¸âƒ£ 2ï¸âƒ£ 3ï¸âƒ£ 4ï¸âƒ£ 5ï¸âƒ£ in the original action order.
-4. If the supplied content contains distinct supported focus areas or facts, add a short section label and 3-6 lines, each beginning with one relevant emoji such as ğŸ” âš ï¸ ğŸ” ğŸ›¡ï¸ ğŸ“± ğŸ’» ğŸ“§ ğŸ”„. Omit this section if the source does not support it.
-5. End with a concise conclusion. If the content already contains "Ø§Ù„Ø®Ù„Ø§ØµØ©:", preserve its meaning without duplicating it.
-6. Add 8-12 concise relevant Arabic and English hashtags on the final lines. Always include #Ù†Ø¨Ø¶_Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ and #Ø§Ù„Ø£Ù…Ù†_Ø§Ù„Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ.
-Keep paragraphs short and mobile-friendly. Use no Markdown headings, asterisks, bullet characters, tables or fabricated citations. Preserve English technical terms where useful.
-Return ONLY valid JSON: {{"social_copy":"..."}}
-
-TITLE:
-{req.title}
-
-CONTENT:
-{req.content}
-
-REQUIRED ACTIONS:
-{req.required_action}'''
-    try:
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        data = extract_json(client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text)
-        social_copy = str(data.get("social_copy", "")).strip()
-        if len(social_copy) < 20: raise ValueError("Ù„Ù… ÙŠÙØ±Ø¬Ø¹ OpenAI Ù…Ø­ØªÙˆÙ‰ Ù…Ù†Ø³Ù‚Ù‹Ø§")
-        return {"social_copy":social_copy[:12000]}
-    except Exception as exc:
-        raise HTTPException(500, f"ØªØ¹Ø°Ø± Ø¥Ù†Ø´Ø§Ø¡ Ù…Ø­ØªÙˆÙ‰ Ù…ÙˆØ§Ù‚Ø¹ Ø§Ù„ØªÙˆØ§ØµÙ„: {str(exc)[:700]}")
-
-def _visual_script(req: VisualAlertRequest) -> dict[str, Any]:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    prompt = f'''You are a professional cybersecurity short-form video editor.
-Transform ONLY the supplied Arabic cybersecurity alert into a concise vertical video script. Never invent CVEs, severity, versions, vendors, attack vectors, exploitation status, patches, affected systems, IOCs, or recommendations not explicitly supplied.
-Target 32-44 seconds and never exceed 46 seconds. A fixed 10-second branded outro is appended after these scenes, and the complete exported video must remain under 58 seconds. The combined voiceText across ALL scenes must be no more than 82 Arabic words. Use the minimum number of scenes needed. Arabic RTL. On-screen text is maximum 9 words and 2 lines. Voice text is natural, concise, and not a verbatim copy of on-screen text.
-Build a visually diverse sequence driven by the meaning of each scene. Do NOT default every scene to a SOC, control room, server room, or wall of screens. Choose a different appropriate real-world setting for each scene from possibilities such as a private employee office, open-plan workplace, executive office, meeting room, government service counter, reception, remote-work desk, home living room, family using phones or a laptop, cafÃ©, airport or travel setting, data center, technical workshop, or SOC. Use a SOC or server room only when the supplied alert specifically supports it. A family or home scene is allowed only when the content concerns personal cyber safety, children, parents, home devices, scams, passwords, social media, or public awareness.
-A scene may instead contain no people and use a realistic screen-capture-style or object-focused visual when that communicates the supplied content better. Appropriate examples include a red compromised computer screen, phishing email, suspicious link, fake sign-in page, account takeover warning, malware alert, unusual login activity, compromised cloud session, fraudulent message, unsafe attachment, security update, patch deployment, locked device, or incident dashboard. The screen must show the exact supported mechanism through recognizable interface structure, cursor focus, warning state, highlighted suspicious element, or security statusâ€”without inventing names, credentials, messages, CVEs, brands, or technical facts. Use screen capture only when directly relevant, and vary it with other scene types rather than making every scene a screen.
-An anonymous hooded attacker at a laptop may be used as a dark navy/cyan cinematic silhouette similar to a serious cybersecurity editorial photograph, but ONLY when the supplied content directly discusses an attacker, active hacking, compromise, intrusion, malware operation or theft. Keep the face obscured, do not identify a nationality, organization or real person, and do not use this image as a generic decoration for ordinary awareness topics.
-Every visualSuggestion must name one concrete setting or screen type, subjects if any, exact action, and relevant device; settings and compositions must not repeat across scenes. Keep people respectful, professional, realistic, culturally accurate, and relevant to the supplied alert.
-Return ONLY valid JSON with videoTitle, estimatedDuration, and scenes. Each scene must contain id, type (intro/headline/content/risk/action/outro), duration (integer seconds), onScreenText, voiceText, subtitleEnglish, visualMode (environment/screen_capture/device_closeup/object_only/hacker_scene), visualSetting, visualSuggestion. subtitleEnglish must be a faithful, concise English translation of voiceText, suitable for a single subtitle line; preserve product names, CVEs, versions and technical meaning exactly. The required action must be communicated clearly near the end. The FINAL scene must always be type outro and provide a concise conclusion or memorable takeaway based only on the supplied content.
-
-ALERT TITLE:
-{req.title}
-
-ALERT CONTENT:
-{req.content}
-
-REQUIRED ACTION:
-{req.required_action}
-
-SELECTED VISUAL STYLE:
-{req.visual_style}
-
-PREFERRED THREAT EDITORIAL STYLE:
-{req.threat_visual_style}
-Treat this as a preferred visual option for relevant scenes, not a requirement to repeat it in every asset. When "Mixed Cyber Threats" is selected, deliberately vary among red warning screens, mobile alerts, system errors or updates, a concerned device user, and an anonymous attacker only where factually appropriate.'''
-    raw = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False).output_text
-    data = extract_json(raw)
-    scenes = data.get("scenes") if isinstance(data, dict) else None
-    if not isinstance(scenes, list) or not scenes: raise ValueError("Ù„Ù… ÙŠÙØ±Ø¬Ø¹ OpenAI Ù…Ø´Ø§Ù‡Ø¯ ØµØ§Ù„Ø­Ø©")
-    clean = []
-    for i, scene in enumerate(scenes[:8]):
-        if not isinstance(scene, dict): continue
-        clean.append({
-            "id":f"scene-{i+1}", "type":str(scene.get("type", "content"))[:30],
-            "duration":max(3, min(15, int(scene.get("duration", 6)))),
-            "onScreenText":" ".join(str(scene.get("onScreenText", "")).split()[:9]),
-            "voiceText":str(scene.get("voiceText", "")).strip()[:700],
-            "subtitleEnglish":" ".join(str(scene.get("subtitleEnglish", "")).strip().split())[:500],
-            "visualMode":str(scene.get("visualMode", "environment")).strip()[:40],
-            "visualSetting":str(scene.get("visualSetting", "")).strip()[:160],
-            "visualSuggestion":str(scene.get("visualSuggestion", "")).strip()[:500],
-        })
-    if not clean: raise ValueError("ØªØ¹Ø°Ø± ØªÙƒÙˆÙŠÙ† Ù…Ø´Ø§Ù‡Ø¯ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ")
-    remaining = 105
-    for i, scene in enumerate(clean):
-        words = scene["voiceText"].split()
-        later = len(clean) - i - 1
-        allowance = min(20, max(6, remaining - later * 12))
-        scene["voiceText"] = " ".join(words[:allowance])
-        remaining -= min(len(words), allowance)
-    return {"videoTitle":str(data.get("videoTitle", req.title))[:300], "scenes":clean}
-
-def _veo_prompt(scene: dict[str, Any], req: VisualAlertRequest) -> str:
-    styles = {
-        "Cinematic AI":"premium cinematic realism, dramatic controlled lighting, shallow depth of field, slow dolly camera, polished film color grade",
-        "SOC Operations":"realistic UAE cybersecurity operations aesthetic when the scene actually requires it, focused response activity, cool blue practical lighting",
-        "Executive GRC":"premium UAE government executive environment, risk and governance meeting, elegant architecture, restrained corporate lighting",
-        "Cyber Awareness":"human-centered UAE workplace cybersecurity awareness scene, clear everyday action, warm professional lighting",
-    }
-    selected = req.visual_style
-    if selected == "Auto":
-        selected = "Executive GRC" if scene.get("type") == "action" else "Cyber Awareness" if scene.get("type") in {"risk","content"} else "Cinematic AI"
-    threat_styles = {
-        "Auto by Content":"Choose the most accurate threat visual motif from the factual scene.",
-        "Warning Screens":"Prefer a close laptop or desktop with multiple translucent red warning triangles and a clear compromised-system state; people are optional.",
-        "Mobile Alerts":"Prefer a close smartphone in hand showing a bold warning-state interface, with a softly blurred workstation behind it.",
-        "System Errors and Updates":"Prefer a realistic laptop or device showing an error, failed update, urgent security patch, or remediation state supported by the scene.",
-        "Concerned User":"Prefer a realistic concerned office worker reacting to a phone or laptop warning, using red risk light only around the affected device.",
-        "Anonymous Hacker":"Prefer an anonymous hooded silhouette at a laptop with dark navy/cyan lighting, only when an attacker, intrusion, phishing or compromise is explicitly supported.",
-        "Mixed Cyber Threats":"Select one distinct motif appropriate to this scene: red warning screen, mobile alert, system error/update, concerned user, or anonymous attacker. Do not repeat the motif used by another asset.",
-    }
-    return f'''Create a vertical 9:16 cinematic B-roll shot for an Arabic cybersecurity alert.
-Visual style: {styles.get(selected, styles["Cinematic AI"])}.
-Required setting: {scene.get("visualSetting") or "a real-world location directly relevant to the scene"}.
-Visual mode: {scene.get("visualMode") or "environment"}.
-Scene: {scene.get("visualSuggestion") or scene.get("onScreenText")}.
-Preferred threat editorial motif: {threat_styles.get(req.threat_visual_style, threat_styles["Auto by Content"])}
-Campaign visual language: premium UAE public-awareness film, human-centered documentary realism, natural expressions and everyday actions, refined dark navy-to-teal cinematic color grade, soft practical lighting, shallow depth of field, polished but believable government communication style. Compose the subject in the middle and lower portions while preserving clean, low-detail negative space around the lower-middle text zone. Do not generate any text inside the visual asset; typography is added later by the video renderer.
-Choose the environment from the required setting and factual content, not from generic cybersecurity imagery. Possible environments include private offices, open workplaces, meeting rooms, government service areas, reception spaces, home or family settings, remote-work desks, cafÃ©s, travel environments, data centers, technical rooms, and SOC facilities. Do not use a SOC, server room, large monitoring wall, or multiple cyber screens unless this exact scene requires it. Do not repeat the setting, camera angle, people arrangement, or main device used in another asset from this video.
-If visual mode is screen_capture, create a convincing full-frame or close-up screen-capture-style interface that directly depicts the supported event, such as a phishing email layout, suspicious hyperlink focus, fake login form, unusual login warning, malicious attachment state, malware alert, compromised session, or security update. Make the mechanism understandable through layout, icons, warning colors, cursor position, highlights and interface state. Do not invent personal data, credentials, sender names, domains, brands, CVEs, versions, or unsupported incident details. Any interface copy must be abstract, blurred or non-readable; the separate video overlay supplies the real text.
-If visual mode is object_only or device_closeup, show the relevant screen, device, update, patch, warning, email or technical object without any person in frame. If visual mode is hacker_scene, show one anonymous hooded attacker as a face-obscured silhouette behind a laptop in a dark navy and cyan cinematic environment, similar to a serious cybersecurity editorial photograph. Use hacker_scene only when the supplied facts explicitly support an attacker, hacking or compromise; never imply identity or attribution.
-Show culturally accurate Emirati people only where people improve the scene. Emirati men must have authentic Gulf/Emirati facial features and wear a pristine white kandura, white ghutra and clearly visible black agal. Emirati women must have calm, dignified Emirati facial features and wear an elegant modest black abaya with a black shayla. Family members and children may appear only for relevant personal or family cybersecurity awareness, in a natural, respectful UAE home context. Keep wardrobe culturally accurate and professional. Include realistic phones, tablets, laptops, office computers, home devices, security screens, or servers only when relevant to this exact scene. Natural human movement, realistic hands, coherent screen glow, subtle camera motion, premium commercial production quality. No dialogue and no generated audio is needed. No readable text, logos, captions, watermarks, distorted faces, extra fingers, panic, weapons, sensational criminal stereotypes, or fantasy interfaces.'''
-
-def _cinematic_still_prompt(scene: dict[str, Any], req: VisualAlertRequest, index: int) -> str:
-    directions = ["wide environmental establishing composition", "medium private-office composition", "over-the-shoulder device interaction", "human-centered conversational composition", "close-up action with environmental context", "calm wide closing composition"]
-    mode = scene.get("visualMode")
-    composition = "anonymous hooded attacker silhouette centered behind a laptop, face fully obscured, dark navy/cyan editorial lighting" if mode == "hacker_scene" else "full-frame realistic screen capture or tight device-screen close-up with a clearly visible incident state and no people" if mode in {"screen_capture", "object_only", "device_closeup"} else directions[index]
-    return _veo_prompt(scene, req).replace("Create a vertical 9:16 cinematic B-roll shot", "Create a single vertical 9:16 cinematic editorial still image").replace("Natural human movement", "Natural body posture") + f"\nDistinct still-image composition: {composition}. Match this specific scene only and do not reuse the composition of another scene. Sharp photographic detail, strong foreground-midground-background separation, suitable for subtle cinematic pan and zoom."
-
-def _generate_veo_clip(prompt: str, output_path: Path):
-    api_key = os.environ["GEMINI_API_KEY"]
-    base = "https://generativelanguage.googleapis.com/v1beta"
-    model = os.getenv("GEMINI_VIDEO_MODEL", "veo-3.1-fast-generate-preview")
-    headers = {"x-goog-api-key":api_key, "Content-Type":"application/json"}
-    def ensure_ok(response: httpx.Response, stage: str):
-        if response.is_success: return
-        try:
-            body = response.json(); detail = (body.get("error") or {}).get("message") or str(body.get("error") or body)
-        except Exception:
-            detail = response.text[:900]
-        raise ValueError(f"ÙØ´Ù„ Veo Ø£Ø«Ù†Ø§Ø¡ {stage} (HTTP {response.status_code}): {detail[:900]}")
-    with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0), follow_redirects=True) as client:
-        created = client.post(f"{base}/models/{model}:predictLongRunning", headers=headers, json={"instances":[{"prompt":prompt}], "parameters":{"aspectRatio":"9:16", "resolution":"720p"}})
-        ensure_ok(created, "Ø¨Ø¯Ø¡ ØªÙˆÙ„ÙŠØ¯ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ"); operation = created.json()
-        operation_name = operation.get("name")
-        if not operation_name: raise ValueError("Ù„Ù… ÙŠÙØ±Ø¬Ø¹ Gemini Ù…Ø¹Ø±Ù‘Ù Ø¹Ù…Ù„ÙŠØ© ÙÙŠØ¯ÙŠÙˆ")
-        deadline = time.time() + 720
-        while time.time() < deadline:
-            status = client.get(f"{base}/{operation_name}", headers=headers)
-            ensure_ok(status, "Ù…ØªØ§Ø¨Ø¹Ø© Ø­Ø§Ù„Ø© Ø§Ù„ÙÙŠØ¯ÙŠÙˆ"); data = status.json()
-            if data.get("done"):
-                if data.get("error"): raise ValueError("ÙØ´Ù„ ØªÙˆÙ„ÙŠØ¯ Ù„Ù‚Ø·Ø© Veo: " + str((data["error"] or {}).get("message") or data["error"])[:900])
-                samples = (((data.get("response") or {}).get("generateVideoResponse") or {}).get("generatedSamples") or [])
-                url = (((samples[0] if samples else {}).get("video") or {}).get("uri"))
-                if not url: raise ValueError("Ø§ÙƒØªÙ…Ù„ Veo Ø¯ÙˆÙ† Ø±Ø§Ø¨Ø· ÙÙŠØ¯ÙŠÙˆ ØµØ§Ù„Ø­")
-                video = client.get(url, headers={"x-goog-api-key":api_key})
-                ensure_ok(video, "ØªÙ†Ø²ÙŠÙ„ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ"); output_path.write_bytes(video.content); return
-            time.sleep(10)
-    raise ValueError("Ø§Ù†ØªÙ‡Øª Ù…Ù‡Ù„Ø© Ø§Ù†ØªØ¸Ø§Ø± ØªÙˆÙ„ÙŠØ¯ ÙÙŠØ¯ÙŠÙˆ Veo")
-
-def _split_veo_clip(source: Path, work_dir: Path) -> list[str]:
-    clips = []
-    for i, (start, length) in enumerate(((0.0, 2.7), (2.7, 2.7), (5.4, 2.6)), 1):
-        target = work_dir / f"veo-segment-{i}.mp4"
-        result = subprocess.run(["ffmpeg", "-y", "-ss", str(start), "-i", str(source), "-t", str(length), "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", str(target)], capture_output=True, text=True, timeout=180)
-        if result.returncode != 0 or not target.exists(): raise ValueError("ØªØ¹Ø°Ø± ØªÙ‚Ø³ÙŠÙ… Ù…Ù‚Ø·Ø¹ Veo Ø¥Ù„Ù‰ Ø«Ù„Ø§Ø«Ø© Ù…Ø´Ø§Ù‡Ø¯")
-        clips.append(str(target))
-    return clips
-
-def _extract_gemini_audio(payload: Any) -> tuple[bytes, str, int, int] | None:
-    """Find audio in both the current Interactions REST schema and legacy responses."""
-    def walk(value: Any, inherited: dict[str, Any] | None = None):
-        if isinstance(value, dict):
-            meta = dict(inherited or {})
-            for key in ("mime_type", "mimeType", "sample_rate", "sampleRate", "channels"):
-                if value.get(key) is not None:
-                    meta[key] = value[key]
-
-            mime = str(meta.get("mime_type") or meta.get("mimeType") or "").lower()
-            is_audio = value.get("type") in {"audio", "output_audio"} or mime.startswith("audio/")
-            data = value.get("data")
-            if is_audio and isinstance(data, str) and data:
-                try:
-                    decoded = base64.b64decode(data, validate=True)
-                except (ValueError, TypeError):
-                    decoded = b""
-                if decoded:
-                    rate = int(meta.get("sample_rate") or meta.get("sampleRate") or 24000)
-                    channels = int(meta.get("channels") or 1)
-                    return decoded, mime or "audio/l16", rate, channels
-
-            for key in ("output_audio", "inlineData", "inline_data", "audio"):
-                if key in value:
-                    found = walk(value[key], meta)
-                    if found:
-                        return found
-            for key, child in value.items():
-                if key not in {"output_audio", "inlineData", "inline_data", "audio", "data"}:
-                    found = walk(child, meta)
-                    if found:
-                        return found
-        elif isinstance(value, list):
-            for child in value:
-                found = walk(child, inherited)
-                if found:
-                    return found
-        return None
-
-    return walk(payload)
-
-def _gemini_response_shape(payload: Any) -> str:
-    if not isinstance(payload, dict):
-        return type(payload).__name__
-    keys = sorted(str(key) for key in payload.keys())[:12]
-    step_types = []
-    for step in payload.get("steps", []) if isinstance(payload.get("steps"), list) else []:
-        if isinstance(step, dict):
-            step_types.append(str(step.get("type") or step.get("role") or "unknown"))
-    suffix = f"; step_types={step_types[:12]}" if step_types else ""
-    return f"keys={keys}{suffix}"
-
-def _gemini_tts(script: dict[str, Any]) -> tuple[bytes, str, int, int]:
-    transcript = "\n".join(s["voiceText"] for s in script["scenes"] if s.get("voiceText"))
-    if not transcript: raise ValueError("Ø³ÙŠÙ†Ø§Ø±ÙŠÙˆ Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ Ø§Ù„ØµÙˆØªÙŠ ÙØ§Ø±Øº")
-    instruction = f'''Read the following Arabic cybersecurity alert in a natural professional UAE/Emirati speaking style.
-Male voice. Calm, confident cybersecurity news presenter. Moderate pace, clear Arabic pronunciation, no exaggerated emotion. Keep English product names and cybersecurity terms clearly pronounced. Read only the transcript, without adding any words.
-
-TRANSCRIPT:
-{transcript}'''
-    model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
-    with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
-        response = client.post(
-            "https://generativelanguage.googleapis.com/v1beta/interactions",
-            headers={"x-goog-api-key":os.environ["GEMINI_API_KEY"], "Content-Type":"application/json", "Api-Revision":"2026-05-20"},
-            json={"model":model, "input":instruction, "response_format":{"type":"audio"}, "generation_config":{"speech_config":[{"voice":os.getenv("GEMINI_TTS_VOICE", "Charon")}]}},
-        )
-        response.raise_for_status()
-        payload = response.json()
-    audio = _extract_gemini_audio(payload)
-    if not audio:
-        raise ValueError("Ù„Ù… ÙŠÙØ±Ø¬Ø¹ Gemini Ø¨ÙŠØ§Ù†Ø§Øª ØµÙˆØªÙŠØ© Ù‚Ø§Ø¨Ù„Ø© Ù„Ù„Ù‚Ø±Ø§Ø¡Ø© (" + _gemini_response_shape(payload) + ")")
-    return audio
-
-def _write_wav(path: Path, audio: bytes, mime_type: str = "audio/l16", sample_rate: int = 24000, channels: int = 1) -> float:
-    if audio.startswith(b"RIFF") or "wav" in mime_type.lower():
-        path.write_bytes(audio)
-    else:
-        with wave.open(str(path), "wb") as wf:
-            wf.setnchannels(max(1, channels)); wf.setsampwidth(2); wf.setframerate(max(8000, sample_rate)); wf.writeframes(audio)
-    with wave.open(str(path), "rb") as wf:
-        return wf.getnframes() / float(wf.getframerate())
-
-def _limit_voice_duration(path: Path, duration: float, maximum: float = 46.0) -> float:
-    if duration <= maximum: return duration
-    tempo = min(2.0, duration / maximum)
-    adjusted = path.with_name("voiceover-adjusted.wav")
-    result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-filter:a", f"atempo={tempo:.5f}", str(adjusted)], capture_output=True, text=True, timeout=120)
-    if result.returncode != 0 or not adjusted.exists(): raise ValueError("ØªØ¹Ø°Ø± Ø¶Ø¨Ø· Ù…Ø¯Ø© Ø§Ù„Ù…Ø­ØªÙˆÙ‰ Ù‚Ø¨Ù„ Ø®Ø§ØªÙ…Ø© Ø§Ù„Ø¹Ù„Ø§Ù…Ø© Ø§Ù„ØªØ¬Ø§Ø±ÙŠØ©")
-    shutil.move(str(adjusted), str(path))
-    with wave.open(str(path), "rb") as wf: return wf.getnframes() / float(wf.getframerate())
-
-def _write_corporate_music(path: Path, duration: float):
-    """Create a stereo cinematic corporate ambient bed with pad, pulse and digital shimmer."""
-    rate = 24000
-    seconds = min(60.0, max(18.0, duration + 1.5))
-    total = int(rate * seconds)
-    progression = [(261.63,329.63,392.00),(220.00,261.63,329.63),(174.61,220.00,261.63),(196.00,246.94,293.66)]
-    frames = bytearray()
-    for n in range(total):
-        t = n / rate; chord = progression[int(t // 4) % len(progression)]
-        local = t % .5; pluck = math.exp(-local * 7.5)
-        pad = sum(math.sin(2 * math.pi * f * t) for f in chord) / 3
-        pulse_note = chord[int((t * 2) % 3)] * 2
-        pulse = math.sin(2 * math.pi * pulse_note * t) * pluck
-        shimmer = math.sin(2 * math.pi * chord[2] * 2 * t) * (.15 + .1 * math.sin(2 * math.pi * .12 * t))
-        intro = min(1.0, t / 1.2); outro = min(1.0, max(0.0, seconds - t) / 1.4)
-        bed = (pad * .38 + pulse * .20) * intro * outro
-        left = bed + shimmer * .12 * intro * outro
-        right_shimmer = math.sin(2 * math.pi * chord[2] * 2 * t + .42) * (.15 + .1 * math.sin(2 * math.pi * .12 * t))
-        right = bed * .97 + right_shimmer * .12 * intro * outro
-        for sample in (left, right):
-            value = max(-32767, min(32767, int(sample * 12500)))
-            frames.extend(value.to_bytes(2, "little", signed=True))
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(rate); wf.writeframes(frames)
-
-def _normalize_final_video_audio(path: Path):
-    """Match the supplied reference videos: about -14 LUFS integrated and -1 dBTP."""
-    normalized = path.with_name("visual-alert-normalized.mp4")
-    result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-c:v", "copy", "-af", "loudnorm=I=-14:TP=-1:LRA=6", "-c:a", "aac", "-b:a", "192k", str(normalized)], capture_output=True, text=True, timeout=240)
-    if result.returncode != 0 or not normalized.exists(): raise ValueError("ØªØ¹Ø°Ø± Ø¶Ø¨Ø· Ù…Ø³ØªÙˆÙ‰ Ø§Ù„ØµÙˆØª Ø§Ù„Ù†Ù‡Ø§Ø¦ÙŠ Ø¥Ù„Ù‰ -14 LUFS")
-    shutil.move(str(normalized), str(path))
-
-def _append_brand_outro(path: Path):
-    parts = sorted((BASE_DIR / "assets").glob("cyberpulse-outro.b64.part*"))
-    if not parts: raise ValueError("Ù…Ù„Ù Ø®Ø§ØªÙ…Ø© Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯")
-    outro = path.with_name("cyberpulse-brand-outro.mp4")
-    outro.write_bytes(base64.b64decode("".join(part.read_text(encoding="ascii") for part in parts)))
-    combined = path.with_name("visual-alert-with-outro.mp4")
-    filters = "[0:v]fps=30,scale=1080:1920,setsar=1[v0];[1:v]fps=30,scale=1080:1920,setsar=1[v1];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
-    result = subprocess.run(["ffmpeg", "-y", "-i", str(path), "-i", str(outro), "-filter_complex", filters, "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(combined)], capture_output=True, text=True, timeout=360)
-    if result.returncode != 0 or not combined.exists(): raise ValueError("ØªØ¹Ø°Ø± Ø¯Ù…Ø¬ Ø®Ø§ØªÙ…Ø© Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ: " + (result.stderr or result.stdout)[-700:])
-    shutil.move(str(combined), str(path))
-
-def _fit_scene_durations(script: dict[str, Any], audio_duration: float):
-    if audio_duration > 46.5: raise ValueError("ØªØ¹Ø°Ø± Ø¶Ø¨Ø· Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ Ø§Ù„ØµÙˆØªÙŠ Ù‚Ø¨Ù„ Ø®Ø§ØªÙ…Ø© Ø§Ù„Ø¹Ù„Ø§Ù…Ø© Ø§Ù„ØªØ¬Ø§Ø±ÙŠØ©")
-    scenes = script["scenes"]
-    weights = [max(1, len(s.get("voiceText", "").split())) for s in scenes]
-    total = sum(weights)
-    target = min(47.0, max(18.0, audio_duration + 1.0))
-    remaining = target
-    for i, scene in enumerate(scenes):
-        duration = remaining if i == len(scenes)-1 else max(2.5, target * weights[i] / total)
-        scene["duration"] = round(duration, 2); remaining -= duration
-    script["estimatedDuration"] = round(target, 2)
-
-def _cleanup_visual_jobs():
-    cutoff = time.time() - 3600
-    expired = []
-    with VISUAL_ALERT_JOBS_LOCK:
-        for job_id, job in VISUAL_ALERT_JOBS.items():
-            if job.get("created_ts", time.time()) < cutoff: expired.append((job_id, job.get("work_dir")))
-        for job_id, _ in expired: VISUAL_ALERT_JOBS.pop(job_id, None)
-    for _, folder in expired:
-        if folder: shutil.rmtree(folder, ignore_errors=True)
-
-def _run_visual_alert_job(job_id: str, req: VisualAlertRequest):
-    work_dir = Path(tempfile.mkdtemp(prefix=f"cyberpulse-alert-{job_id[:8]}-"))
-    _visual_job_update(job_id, work_dir=str(work_dir), status="analyzing", progress=12, message="Ø¬Ø§Ø±ÙŠ ØªØ­Ù„ÙŠÙ„ Ø§Ù„ØªÙ†Ø¨ÙŠÙ‡...")
-    try:
-        script = _visual_script(req)
-        _visual_job_update(job_id, status="generating_voice", progress=38, message="Ø¬Ø§Ø±ÙŠ Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ Ø§Ù„ØµÙˆØªÙŠ...", script=script)
-        audio, mime_type, sample_rate, channels = _gemini_tts(script)
-        audio_path = work_dir / "voiceover.wav"
-        duration = _write_wav(audio_path, audio, mime_type, sample_rate, channels)
-        duration = _limit_voice_duration(audio_path, duration)
-        music_path = work_dir / "inspirational-corporate.wav"
-        _write_corporate_music(music_path, duration)
-        _fit_scene_durations(script, duration)
-        clip_paths, image_paths = [], []
-        selected = [script["scenes"][i % len(script["scenes"])] for i in range(6)]
-        for video_index in range(req.video_count):
-            _visual_job_update(job_id, status="generating_visuals", progress=46+video_index*5, message=f"Ø¬Ø§Ø±ÙŠ Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ {video_index+1} Ù…Ù† {req.video_count}...", script=script)
-            clip_path = work_dir / f"veo-source-{video_index+1}.mp4"
-            try:
-                scene = selected[(video_index * 2) % len(selected)]
-                _generate_veo_clip(_veo_prompt(scene, req) + f"\nUnique video shot {video_index+1} of {req.video_count}. Use a distinct camera angle and scene composition. Do not repeat any earlier shot.", clip_path)
-                clip_paths.append(str(clip_path))
-            except Exception as veo_error:
-                if "429" not in str(veo_error) and "quota" not in str(veo_error).lower(): raise
-                _visual_job_update(job_id, message=f"ØªÙˆÙ‚Ù‘Ù Veo Ø¹Ù†Ø¯ {len(clip_paths)} ÙÙŠØ¯ÙŠÙˆ Ø¨Ø³Ø¨Ø¨ Ø§Ù„Ø­ØµØ©Ø› Ø³ÙŠØªÙ… Ø¶Ø¨Ø· Ø¹Ø¯Ø¯ Ø§Ù„ØµÙˆØ± ØªÙ„Ù‚Ø§Ø¦ÙŠÙ‹Ø§.", veo_fallback=str(veo_error)[:500])
-                break
-        image_indices = (1, 3, 5) if len(clip_paths) == 3 else (1, 2, 3, 4, 5) if len(clip_paths) == 1 else (0, 1, 2, 3, 4, 5)
-        for position, i in enumerate(image_indices, 1):
-            _visual_job_update(job_id, status="generating_visuals", progress=min(74, 52+position*4), message=f"Ø¬Ø§Ø±ÙŠ Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„ØµÙˆØ±Ø© {position} Ù…Ù† {len(image_indices)} Ø­Ø³Ø¨ Ù…Ø­ØªÙˆÙ‰ Ø§Ù„Ù…Ø´Ù‡Ø¯...", script=script)
-            image_b64, _ = generate_nano_banana_image(_cinematic_still_prompt(selected[i], req, i), "9:16")
-            image_path = work_dir / f"ai-scene-{position}.jpg"
-            image_path.write_bytes(base64.b64decode(image_b64)); image_paths.append(str(image_path))
-        asset_order = [f"video:{i+1}" for i in range(len(clip_paths))] + [f"image:{i+1}" for i in range(len(image_paths))]
-        _visual_job_update(job_id, status="ready_for_review", progress=78, message="Ø§Ù„Ù…ÙˆØ§Ø¯ Ø¬Ø§Ù‡Ø²Ø© Ù„Ù„Ù…Ø±Ø§Ø¬Ø¹Ø© ÙˆØ§Ù„ØªØ±ØªÙŠØ¨. ÙˆØ§ÙÙ‚ Ø¹Ù„ÙŠÙ‡Ø§ Ù„Ø¨Ø¯Ø¡ Ø§Ù„Ø¯Ù…Ø¬.", script=script, clip_count=len(clip_paths), image_count=len(image_paths), asset_order=asset_order, preview_ready=True)
-    except Exception as exc:
-        _visual_job_update(job_id, status="failed", message=str(exc)[:1400], detail=str(exc)[:1400], completed_at=datetime.now(timezone.utc).isoformat())
-
-def _regenerate_visual_alert_audio(job_id: str, req: VisualAlertRequest):
-    with VISUAL_ALERT_JOBS_LOCK:
-        job = VISUAL_ALERT_JOBS.get(job_id)
-        if not job: return
-        work_dir = Path(job["work_dir"])
-    try:
-        script = _visual_script(req)
-        _visual_job_update(job_id, status="regenerating_audio", progress=42, message="Ø¬Ø§Ø±ÙŠ Ø¥Ø¹Ø§Ø¯Ø© Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ Ø§Ù„ØµÙˆØªÙŠ Ù…Ù† Ø§Ù„Ù…Ø­ØªÙˆÙ‰ Ø§Ù„Ù…Ø¹Ø¯Ù‘Ù„...", script=script)
-        audio, mime_type, sample_rate, channels = _gemini_tts(script)
-        new_audio = work_dir / "voiceover-new.wav"
-        duration = _write_wav(new_audio, audio, mime_type, sample_rate, channels)
-        duration = _limit_voice_duration(new_audio, duration)
-        new_music = work_dir / "inspirational-corporate-new.wav"
-        _write_corporate_music(new_music, duration)
-        _fit_scene_durations(script, duration)
-        shutil.move(str(new_audio), str(work_dir / "voiceover.wav"))
-        shutil.move(str(new_music), str(work_dir / "inspirational-corporate.wav"))
-        _visual_job_update(job_id, status="ready_for_review", progress=78, message="ØªÙ… ØªØ­Ø¯ÙŠØ« Ø§Ù„Ù†Øµ ÙˆØ§Ù„ØªØ¹Ù„ÙŠÙ‚ Ø§Ù„ØµÙˆØªÙŠ. Ø§Ù„ØµÙˆØ± ÙˆØ§Ù„ÙÙŠØ¯ÙŠÙˆÙ‡Ø§Øª Ù„Ù… ØªØªØºÙŠØ±.", script=script, audio_regenerated=True, audio_regeneration_error=None)
-    except Exception as exc:
-        _visual_job_update(job_id, status="ready_for_review", progress=78, message="ØªØ¹Ø°Ø± Ø¥Ø¹Ø§Ø¯Ø© ØªÙˆÙ„ÙŠØ¯ Ø§Ù„ØµÙˆØªØ› Ø¨Ù‚ÙŠ Ø§Ù„ØµÙˆØª Ø§Ù„Ø³Ø§Ø¨Ù‚ Ù…ØªØ§Ø­Ù‹Ø§.", audio_regeneration_error=str(exc)[:900])
-
-def _render_approved_visual_alert(job_id: str):
-    try:
-        with VISUAL_ALERT_JOBS_LOCK:
-            job = VISUAL_ALERT_JOBS.get(job_id)
-            if not job: return
-            work_dir = Path(job["work_dir"]); script = job["script"]; asset_order = job.get("asset_order", []); motion_overlays = bool(job.get("motion_overlays")); threat_visual_style = job.get("threat_visual_style", "Auto by Content")
-        audio_path = work_dir / "voiceover.wav"
-        music_path = work_dir / "inspirational-corporate.wav"
-        clip_paths = [str(path) for path in sorted(work_dir.glob("veo-source-*.mp4"))]
-        image_paths = [str(path) for path in sorted(work_dir.glob("ai-scene-*.jpg"))]
-        asset_lookup = {**{f"video:{i+1}":{"type":"video","path":path} for i,path in enumerate(clip_paths)}, **{f"image:{i+1}":{"type":"image","path":path} for i,path in enumerate(image_paths)}}
-        visual_assets = [asset_lookup[token] for token in asset_order if token in asset_lookup]
-        if len(visual_assets) != len(asset_lookup): raise ValueError("ØªØ±ØªÙŠØ¨ Ø§Ù„Ù…ÙˆØ§Ø¯ ØºÙŠØ± Ù…ÙƒØªÙ…Ù„")
-        _visual_job_update(job_id, status="rendering", progress=84, message="ØªÙ…Øª Ø§Ù„Ù…ÙˆØ§ÙÙ‚Ø©Ø› Ø¬Ø§Ø±ÙŠ Ø¯Ù…Ø¬ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ ÙˆØ§Ù„ØµÙˆØ± ÙˆØ§Ù„ØµÙˆØª...")
-        props_path = work_dir / "props.json"; output_path = work_dir / "visual-alert.mp4"
-        props_path.write_text(json.dumps({"script":script, "audioPath":str(audio_path), "musicPath":str(music_path), "visualAssets":visual_assets, "motionOverlays":motion_overlays, "threatVisualStyle":threat_visual_style}, ensure_ascii=False), encoding="utf-8")
-        result = subprocess.run(["node", str(BASE_DIR / "remotion" / "render.mjs"), str(props_path), str(output_path)], cwd=BASE_DIR, capture_output=True, text=True, timeout=600)
-        if result.returncode != 0: raise ValueError("ÙØ´Ù„ Remotion: " + (result.stderr or result.stdout)[-1200:])
-        _visual_job_update(job_id, status="rendering", progress=94, message="Ø¬Ø§Ø±ÙŠ Ø¥Ø¶Ø§ÙØ© Ø®Ø§ØªÙ…Ø© Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ...")
-        _append_brand_outro(output_path)
-        _visual_job_update(job_id, status="rendering", progress=97, message="Ø¬Ø§Ø±ÙŠ Ø¶Ø¨Ø· Ø§Ù„Ù…ÙˆØ³ÙŠÙ‚Ù‰ ÙˆØ§Ù„ØµÙˆØª Ø¥Ù„Ù‰ Ø§Ù„Ù…Ø³ØªÙˆÙ‰ Ø§Ù„Ù…Ø±Ø¬Ø¹ÙŠ...")
-        _normalize_final_video_audio(output_path)
-        _visual_job_update(job_id, status="completed", progress=100, message="Ø§ÙƒØªÙ…Ù„ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ", video_ready=True, completed_at=datetime.now(timezone.utc).isoformat())
-    except Exception as exc:
-        _visual_job_update(job_id, status="failed", message=str(exc)[:1400], detail=str(exc)[:1400], completed_at=datetime.now(timezone.utc).isoformat())
-
-@app.post("/api/visual-alert/render", status_code=202)
-def create_visual_alert(req: VisualAlertRequest):
-    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
-    if not os.getenv("GEMINI_API_KEY"): raise HTTPException(400, "GEMINI_API_KEY is not configured")
-    _cleanup_visual_jobs()
-    job_id = str(uuid.uuid4())
-    with VISUAL_ALERT_JOBS_LOCK:
-        VISUAL_ALERT_JOBS[job_id] = {"id":job_id, "status":"pending", "progress":3, "message":"ØªÙ… Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„Ù…Ù‡Ù…Ø©", "threat_visual_style":req.threat_visual_style, "created_ts":time.time(), "created_at":datetime.now(timezone.utc).isoformat()}
-    threading.Thread(target=_run_visual_alert_job, args=(job_id, req), daemon=True).start()
-    return {"id":job_id, "status":"pending", "progress":3, "message":"ØªÙ… Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„Ù…Ù‡Ù…Ø©"}
-
-@app.get("/api/visual-alert/status/{job_id}")
-def visual_alert_status(job_id: str):
-    with VISUAL_ALERT_JOBS_LOCK:
-        job = VISUAL_ALERT_JOBS.get(job_id)
-        if not job: raise HTTPException(404, "Ø§Ù„Ù…Ù‡Ù…Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø© Ø£Ùˆ Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØªÙ‡Ø§")
-        return {k:v for k,v in job.items() if k not in {"work_dir", "created_ts"}}
-
-@app.post("/api/visual-alert/regenerate-audio/{job_id}", status_code=202)
-def regenerate_visual_alert_audio(job_id: str, req: VisualAlertRequest):
-    with VISUAL_ALERT_JOBS_LOCK:
-        job = VISUAL_ALERT_JOBS.get(job_id)
-        if not job: raise HTTPException(404, "Ø§Ù„Ù…Ù‡Ù…Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø© Ø£Ùˆ Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØªÙ‡Ø§")
-        if job.get("status") != "ready_for_review": raise HTTPException(409, "Ø§Ù†ØªØ¸Ø± Ø­ØªÙ‰ ØªØµØ¨Ø­ Ø§Ù„Ù…ÙˆØ§Ø¯ Ø¬Ø§Ù‡Ø²Ø© Ù„Ù„Ù…Ø±Ø§Ø¬Ø¹Ø©")
-        job.update(status="regenerating_audio", progress=35, message="ØªÙ… Ø§Ø³ØªÙ„Ø§Ù… Ø§Ù„Ù…Ø­ØªÙˆÙ‰ Ø§Ù„Ù…Ø¹Ø¯Ù‘Ù„ Ù„Ø¥Ø¹Ø§Ø¯Ø© ØªÙˆÙ„ÙŠØ¯ Ø§Ù„ØµÙˆØª")
-    threading.Thread(target=_regenerate_visual_alert_audio, args=(job_id, req), daemon=True).start()
-    return {"id":job_id, "status":"regenerating_audio", "progress":35}
-
-@app.post("/api/visual-alert/approve/{job_id}", status_code=202)
-def approve_visual_alert(job_id: str, approval: VisualApprovalRequest):
-    with VISUAL_ALERT_JOBS_LOCK:
-        job = VISUAL_ALERT_JOBS.get(job_id)
-        if not job: raise HTTPException(404, "Ø§Ù„Ù…Ù‡Ù…Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø© Ø£Ùˆ Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØªÙ‡Ø§")
-        if job.get("status") != "ready_for_review": raise HTTPException(409, "Ø§Ù„Ù…ÙˆØ§Ø¯ Ù„ÙŠØ³Øª Ø¬Ø§Ù‡Ø²Ø© Ù„Ù„Ù…ÙˆØ§ÙÙ‚Ø©")
-        expected = set(job.get("asset_order", []))
-        supplied = approval.asset_order
-        if len(supplied) != len(expected) or set(supplied) != expected: raise HTTPException(400, "ØªØ±ØªÙŠØ¨ Ø§Ù„Ù…ÙˆØ§Ø¯ ØºÙŠØ± ØµØ§Ù„Ø­ Ø£Ùˆ ØºÙŠØ± Ù…ÙƒØªÙ…Ù„")
-        job.update(status="approval_received", progress=80, message="ØªÙ… Ø§Ø³ØªÙ„Ø§Ù… Ø§Ù„Ù…ÙˆØ§ÙÙ‚Ø©", asset_order=supplied, motion_overlays=approval.motion_overlays)
-    threading.Thread(target=_render_approved_visual_alert, args=(job_id,), daemon=True).start()
-    return {"id":job_id, "status":"approval_received", "progress":80}
-
-@app.get("/api/visual-alert/preview-video/{job_id}/{video_number}")
-def visual_alert_preview_video(job_id: str, video_number: int):
-    if video_number not in {1, 2, 3}: raise HTTPException(404, "Ø±Ù‚Ù… Ø§Ù„ÙÙŠØ¯ÙŠÙˆ ØºÙŠØ± ØµØ§Ù„Ø­")
-    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
-    if not job or job.get("status") not in {"ready_for_review", "approval_received", "rendering", "completed"}: raise HTTPException(404, "Ù…Ø¹Ø§ÙŠÙ†Ø© Ø§Ù„ÙÙŠØ¯ÙŠÙˆ ØºÙŠØ± Ø¬Ø§Ù‡Ø²Ø©")
-    path = Path(job["work_dir"]) / f"veo-source-{video_number}.mp4"
-    if not path.exists(): raise HTTPException(404, "Ù„Ø§ ØªÙˆØ¬Ø¯ Ù„Ù‚Ø·Ø© ÙÙŠØ¯ÙŠÙˆ Ø¨Ø³Ø¨Ø¨ Ø­Ø¯ÙˆØ¯ Veo Ø§Ù„Ø­Ø§Ù„ÙŠØ©")
-    return FileResponse(path, media_type="video/mp4", filename=f"preview-{job_id[:8]}.mp4")
-
-@app.get("/api/visual-alert/preview-audio/{job_id}")
-def visual_alert_preview_audio(job_id: str):
-    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
-    if not job or job.get("status") not in {"ready_for_review", "approval_received", "rendering", "completed"}: raise HTTPException(404, "Ù…Ø¹Ø§ÙŠÙ†Ø© Ø§Ù„ØµÙˆØª ØºÙŠØ± Ø¬Ø§Ù‡Ø²Ø©")
-    path = Path(job["work_dir"]) / "voiceover.wav"
-    if not path.exists(): raise HTTPException(404, "Ù…Ù„Ù Ø§Ù„ØµÙˆØª ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯")
-    return FileResponse(path, media_type="audio/wav", filename=f"voiceover-{job_id[:8]}.wav")
-
-@app.get("/api/visual-alert/preview-image/{job_id}/{image_number}")
-def visual_alert_preview_image(job_id: str, image_number: int):
-    if image_number < 1 or image_number > 6: raise HTTPException(404, "Ø±Ù‚Ù… Ø§Ù„ØµÙˆØ±Ø© ØºÙŠØ± ØµØ§Ù„Ø­")
-    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
-    if not job or job.get("status") not in {"ready_for_review", "approval_received", "rendering", "completed"}: raise HTTPException(404, "Ù…Ø¹Ø§ÙŠÙ†Ø© Ø§Ù„ØµÙˆØ±Ø© ØºÙŠØ± Ø¬Ø§Ù‡Ø²Ø©")
-    path = Path(job["work_dir"]) / f"ai-scene-{image_number}.jpg"
-    if not path.exists(): raise HTTPException(404, "Ø§Ù„ØµÙˆØ±Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©")
-    return FileResponse(path, media_type="image/jpeg")
-
-@app.get("/api/visual-alert/video/{job_id}")
-def visual_alert_video(job_id: str):
-    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
-    if not job or job.get("status") != "completed": raise HTTPException(404, "Ø§Ù„ÙÙŠØ¯ÙŠÙˆ ØºÙŠØ± Ø¬Ø§Ù‡Ø²")
-    path = Path(job["work_dir"]) / "visual-alert.mp4"
-    if not path.exists(): raise HTTPException(404, "Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØ© Ù…Ù„Ù Ø§Ù„ÙÙŠØ¯ÙŠÙˆ")
-    return FileResponse(path, media_type="video/mp4", filename=f"cyberpulse-alert-{job_id[:8]}.mp4")
-
-def _google_drive_access_token() -> str:
-    required = {key:os.getenv(key, "").strip() for key in ("GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET", "GOOGLE_DRIVE_REFRESH_TOKEN")}
-    missing = [key for key, value in required.items() if not value]
-    if missing: raise ValueError("Ø¥Ø¹Ø¯Ø§Ø¯ Google Drive ØºÙŠØ± Ù…ÙƒØªÙ…Ù„: " + ", ".join(missing))
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post("https://oauth2.googleapis.com/token", data={"client_id":required["GOOGLE_DRIVE_CLIENT_ID"], "client_secret":required["GOOGLE_DRIVE_CLIENT_SECRET"], "refresh_token":required["GOOGLE_DRIVE_REFRESH_TOKEN"], "grant_type":"refresh_token"})
-        if not response.is_success: raise ValueError(f"ØªØ¹Ø°Ø± ØªÙÙˆÙŠØ¶ Google Drive (HTTP {response.status_code}): {response.text[:500]}")
-        token = str(response.json().get("access_token", ""))
-        if not token: raise ValueError("Ù„Ù… ÙŠÙØ±Ø¬Ø¹ Google Ø±Ù…Ø² ÙˆØµÙˆÙ„ ØµØ§Ù„Ø­Ù‹Ø§")
-        return token
-
-def _google_drive_upload(name: str, mime_type: str, payload: bytes, access_token: str) -> dict[str, str]:
-    metadata: dict[str, Any] = {"name":name}
-    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
-    if folder_id: metadata["parents"] = [folder_id]
-    headers = {"Authorization":f"Bearer {access_token}", "Content-Type":"application/json; charset=UTF-8", "X-Upload-Content-Type":mime_type, "X-Upload-Content-Length":str(len(payload))}
-    with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0), follow_redirects=False) as client:
-        start = client.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,webViewLink", headers=headers, json=metadata)
-        if not start.is_success or not start.headers.get("Location"): raise ValueError(f"ØªØ¹Ø°Ø± Ø¨Ø¯Ø¡ Ø±ÙØ¹ {name} Ø¥Ù„Ù‰ Google Drive (HTTP {start.status_code}): {start.text[:500]}")
-        uploaded = client.put(start.headers["Location"], headers={"Content-Type":mime_type, "Content-Length":str(len(payload))}, content=payload)
-        if not uploaded.is_success: raise ValueError(f"ØªØ¹Ø°Ø± Ø±ÙØ¹ {name} Ø¥Ù„Ù‰ Google Drive (HTTP {uploaded.status_code}): {uploaded.text[:500]}")
-        data = uploaded.json()
-        return {"id":str(data.get("id", "")), "url":str(data.get("webViewLink", "")), "name":str(data.get("name", name))}
-
-@app.get("/api/visual-alert/archives")
-def visual_alert_archives():
-    with db_conn() as c:
-        return c.execute("SELECT id,title,content,required_action,formatted_content,drive_video_url,drive_text_url,created_at FROM visual_alert_archives ORDER BY created_at DESC LIMIT 100").fetchall()
-
-@app.post("/api/visual-alert/save/{job_id}")
-def save_visual_alert(job_id: str, req: VisualSaveRequest):
-    with VISUAL_ALERT_JOBS_LOCK: job = VISUAL_ALERT_JOBS.get(job_id)
-    if not job or job.get("status") != "completed": raise HTTPException(404, "Ø§Ù„ÙÙŠØ¯ÙŠÙˆ ØºÙŠØ± Ø¬Ø§Ù‡Ø² Ø£Ùˆ Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØ© Ø§Ù„Ù…Ù‡Ù…Ø©")
-    video_path = Path(job["work_dir"]) / "visual-alert.mp4"
-    if not video_path.exists(): raise HTTPException(404, "Ø§Ù†ØªÙ‡Øª ØµÙ„Ø§Ø­ÙŠØ© Ù…Ù„Ù Ø§Ù„ÙÙŠØ¯ÙŠÙˆ")
-    formatted = req.formatted_content.strip() or f"{req.title}\n\n{req.content}\n\nØ§Ù„Ø¥Ø¬Ø±Ø§Ø¡ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨:\n{req.required_action}"
-    archive_id = str(job.get("archive_id") or uuid.uuid4())
-    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", req.title).strip("-")[:60] or f"cyberpulse-{job_id[:8]}"
-    with db_conn() as c:
-        c.execute("INSERT INTO visual_alert_archives(id,title,content,required_action,formatted_content) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET title=EXCLUDED.title,content=EXCLUDED.content,required_action=EXCLUDED.required_action,formatted_content=EXCLUDED.formatted_content", (archive_id,req.title,req.content,req.required_action,formatted)); c.commit()
-    _visual_job_update(job_id, archive_id=archive_id, saved_to_site=True)
-    try:
-        token = _google_drive_access_token()
-        video = _google_drive_upload(f"{safe_name}.mp4", "video/mp4", video_path.read_bytes(), token)
-        text_file = _google_drive_upload(f"{safe_name}-content.txt", "text/plain; charset=UTF-8", formatted.encode("utf-8"), token)
-        with db_conn() as c:
-            c.execute("UPDATE visual_alert_archives SET drive_video_id=%s,drive_video_url=%s,drive_text_id=%s,drive_text_url=%s WHERE id=%s", (video["id"],video["url"],text_file["id"],text_file["url"],archive_id)); c.commit()
-        _visual_job_update(job_id, saved_to_drive=True, archive_id=archive_id, drive_video_url=video["url"], drive_text_url=text_file["url"])
-        return {"saved":True, "saved_to_site":True, "saved_to_drive":True, "archive_id":archive_id, "drive_video_url":video["url"], "drive_text_url":text_file["url"]}
-    except Exception as exc:
-        return {"saved":True, "saved_to_site":True, "saved_to_drive":False, "archive_id":archive_id, "warning":f"ØªÙ… Ø­ÙØ¸ Ø§Ù„Ù†Øµ ÙÙŠ Ø§Ù„Ù…ÙˆÙ‚Ø¹ØŒ Ù„ÙƒÙ† ØªØ¹Ø°Ø± Ø§Ù„Ø­ÙØ¸ ÙÙŠ Google Drive: {str(exc)[:800]}"}
-
-def _video_url(output: Any) -> str:
-    if isinstance(output, str):
-        return output
-    if isinstance(output, list) and output:
-        return _video_url(output[0])
-    if isinstance(output, dict):
-        for key in ("url", "video_url", "video", "output"):
-            if output.get(key):
-                return _video_url(output[key])
-    raise ValueError("Bytez returned no playable video URL")
-
-def _available_bytez_video_models(client: httpx.Client) -> list[str]:
-    url = "https://api.bytez.com/models/v2/list/models"
-    headers = {"Authorization": os.environ["BYTEZ_API_KEY"]}
-    response = client.get(url, headers=headers, params={"task": "text-to-video"})
-    if response.status_code >= 500:
-        response = client.get(url, headers=headers, params={"task": "text-to-video"})
-    if response.status_code >= 500:
-        response = client.get(url, headers=headers)
-    response.raise_for_status()
-    payload = response.json()
-    if isinstance(payload, dict) and payload.get("error"):
-        raise ValueError(str(payload["error"]))
-    rows = payload.get("output", payload.get("models", [])) if isinstance(payload, dict) else payload
-    if isinstance(rows, dict):
-        rows = rows.get("models", rows.get("items", rows.get("data", [])))
-    if not isinstance(rows, list):
-        rows = []
-    models = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        task = row.get("task", row.get("tasks", ""))
-        tasks = task if isinstance(task, list) else [task]
-        model_id = row.get("modelId", row.get("id", row.get("model")))
-        if model_id and "text-to-video" in tasks:
-            models.append(str(model_id).strip())
-    return models
-
-UNAVAILABLE_BYTEZ_VIDEO_MODELS = {"ali-vilab/text-to-video-ms-1.7b"}
-
-def _bytez_video_candidates(client: httpx.Client) -> list[str]:
-    configured = os.getenv("BYTEZ_VIDEO_MODEL", "").strip()
-    models = _available_bytez_video_models(client)
-    configured_is_usable = configured and configured not in UNAVAILABLE_BYTEZ_VIDEO_MODELS
-    candidates = ([configured] if configured_is_usable else []) + models
-    unique = []
-    for model in candidates:
-        if model and model not in UNAVAILABLE_BYTEZ_VIDEO_MODELS and model not in unique:
-            unique.append(model)
-    if unique:
-        return unique
-    raise ValueError(
-        "Ù„Ù… ÙŠØ¹Ø«Ø± Bytez Ø¹Ù„Ù‰ Ø£ÙŠ Ù†Ù…ÙˆØ°Ø¬ text-to-video Ù…ØªØ§Ø­ Ù„Ù‡Ø°Ø§ Ø§Ù„Ù…ÙØªØ§Ø­. "
-        "ØªØ­Ù‚Ù‚ Ù…Ù† ØªÙˆÙØ± Ù†Ù…Ø§Ø°Ø¬ Ø§Ù„ÙÙŠØ¯ÙŠÙˆ ÙˆØ§Ù„Ø±ØµÙŠØ¯ ÙÙŠ Ø­Ø³Ø§Ø¨ Bytez."
-    )
-
-def _run_video_job(job_id: str, req: NewsVideoRequest):
-    model = os.getenv("BYTEZ_VIDEO_MODEL", "automatic").strip() or "automatic"
-    prompt = f'''Create a premium vertical 9:16 editorial cybersecurity video for CYBER PULSE.
-Topic: {req.headline}
-Factual context: {req.summary}
-Threat category: {req.threat_type}
-Visual direction: {req.visual_brief or "abstract digital security environment"}
-Style: {req.style}. Target duration: approximately {req.duration} seconds.
-SEMANTIC RULE: show the affected technology and reported action/risk directly. Every prominent object must be traceable to the topic. Never replace a technical term with an unrelated physical metaphor. Software patches and updates must look like software update/patch deployment, not plumbing, water leaks, bandages, construction, or hand tools. Simplified non-readable interfaces are allowed only when they clarify the story.
-Use dark navy and black with cyan and cyber blue highlights. Use elegant cinematic movement, realistic lighting, and one coherent scene. Do not show readable text, letters, numbers, captions, logos, watermarks, unrelated dashboards, or distorted interfaces. Do not depict graphic violence or panic.'''
-    try:
-        with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
-            payload = None
-            failures = []
-            for model in _bytez_video_candidates(client):
-                response = client.post(
-                    f"https://api.bytez.com/models/v2/{model}",
-                    headers={"Authorization": os.environ["BYTEZ_API_KEY"], "Content-Type":"application/json"},
-                    json={"text": prompt},
-                )
-                if response.status_code == 404:
-                    failures.append(model)
-                    continue
-                response.raise_for_status()
-                payload = response.json()
-                break
-            if payload is None:
-                raise ValueError(
-                    "Ù†Ù…Ø§Ø°Ø¬ Bytez Ø§Ù„ØªØ§Ù„ÙŠØ© ØºÙŠØ± Ù…ØªØ§Ø­Ø© (404): " + ", ".join(failures)
-                    + ". Ø§Ø®ØªØ± Ù†Ù…ÙˆØ°Ø¬ text-to-video Ù…ØªØ§Ø­Ù‹Ø§ Ù…Ù† Ù„ÙˆØ­Ø© Bytez."
-                )
-        error = payload.get("error") if isinstance(payload, dict) else None
-        if error: raise ValueError(str(error))
-        output = payload.get("output", payload) if isinstance(payload, dict) else payload
-        result = {"status":"completed", "video_url":_video_url(output), "model":model, "completed_at":datetime.now(timezone.utc).isoformat()}
-    except Exception as exc:
-        result = {"status":"failed", "detail":str(exc)[:1000], "model":model, "completed_at":datetime.now(timezone.utc).isoformat()}
-    with VIDEO_JOBS_LOCK:
-        VIDEO_JOBS[job_id].update(result)
-
-@app.post("/api/news-video", status_code=202)
-def create_news_video(req: NewsVideoRequest):
-    if not os.getenv("BYTEZ_API_KEY"): raise HTTPException(400, "BYTEZ_API_KEY is not configured")
-    job_id = str(uuid.uuid4())
-    with VIDEO_JOBS_LOCK:
-        VIDEO_JOBS[job_id] = {"id":job_id, "status":"processing", "created_at":datetime.now(timezone.utc).isoformat()}
-    threading.Thread(target=_run_video_job, args=(job_id, req), daemon=True).start()
-    return VIDEO_JOBS[job_id]
-
-@app.get("/api/news-video/{job_id}")
-def news_video_status(job_id: str):
-    with VIDEO_JOBS_LOCK:
-        job = VIDEO_JOBS.get(job_id)
-        if not job: raise HTTPException(404, "Video job not found or the service was restarted")
-        return dict(job)
-
-@app.get("/api/news-sources")
-def news_sources(): return {"count":len(load_cyber_sources()), "sources":load_cyber_sources()}
-
-@app.post("/api/search-news")
-def search_news(req: NewsSearchRequest):
-    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
-    sources = load_cyber_sources()
-    if not sources: raise HTTPException(500, "Cybersecurity source list is not available")
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    source_lines = "\n".join(f"- {s['name']}: {s['url']}" for s in sources)
-    prompt = f'''You are the live news discovery engine for the Arabic cybersecurity publication "Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ | CYBER PULSE".
-Today is {today}. Search the web for the newest meaningful cybersecurity news published within the last {req.days} days.
-
-STRICT SOURCE POLICY:
-Use ONLY the approved source list below. Do not return an article from any other domain. Prefer primary official advisories and vendor research when they are the original source; use established cybersecurity media for major breaking stories. Exclude generic evergreen pages, old articles, duplicate syndications, opinion-only pieces, and items without a publication date.
-
-APPROVED SOURCES:
-{source_lines}
-
-Select up to {req.limit} distinct, high-value items relevant to cybersecurity professionals and government/enterprise organizations. Prioritize: active exploitation, significant vulnerabilities, breaches/incidents, ransomware, threat campaigns, identity/cloud/security platform issues, critical infrastructure, major regulatory/operational cyber developments.
-
-Return ONLY valid JSON with this exact shape:
-{{"items":[{{
-"title_ar":"concise Arabic headline",
-"title_original":"original article/advisory title",
-"date":"exact publication date from source",
-"content_type":"Ø®Ø¨Ø± or Ø«ØºØ±Ø© Ø£Ù…Ù†ÙŠØ© or ØªÙ†Ø¨ÙŠÙ‡ Ø£Ù…Ù†ÙŠ or Ø§Ø®ØªØ±Ø§Ù‚/ØªØ³Ø±ÙŠØ¨ or Ø¨Ø­Ø« Ø£Ù…Ù†ÙŠ",
-"severity":"Ø­Ø±Ø¬ or Ø¹Ø§Ù„ÙŠ or Ù…ØªÙˆØ³Ø· or Ù…Ù†Ø®ÙØ¶ or empty if the source does not state it",
-"cve":"exact CVE identifier(s) or empty",
-"source":"approved source name",
-"source_url":"approved source home/advisory URL",
-"url":"direct URL to the exact article/advisory on an approved domain",
-"summary_ar":"2-3 factual Arabic sentences",
-"news_text_ar":"a self-contained factual Arabic news text of 100-220 words based only on the source, preserving date, affected product/sector, attack/vulnerability details and impact; do not invent recommendations",
-"recommendations":["only recommendations explicitly stated by the source"],
-"relevance":"one short Arabic sentence explaining why this matters"
-}}]}}
-Do not fabricate a CVE, severity, date, recommendation, or URL.'''
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        model = os.getenv("OPENAI_MODEL", "gpt-5")
-        response = client.responses.create(model=model, input=prompt, tools=[{"type":"web_search"}], store=False)
-        data = extract_json(response.output_text)
-        valid, seen = [], set()
-        for item in data.get("items", []):
-            url = str(item.get("url", "")).strip()
-            key = (url.lower(), str(item.get("title_original", item.get("title_ar", ""))).strip().lower())
-            if not url or not url_is_approved(url) or key in seen: continue
-            seen.add(key)
-            valid.append(item)
-            if len(valid) >= req.limit: break
-        return {"searched_at":datetime.now(timezone.utc).isoformat(), "days":req.days, "source_count":len(sources), "items":valid}
-    except Exception as e:
-        raise HTTPException(500, f"News search failed: {e}")
-
-@app.get("/api/archive")
-def archive_list():
-    with db_conn() as c: return c.execute("SELECT id,topic_id,topic,domain,post_type,platform,content,created_at,updated_at FROM posts ORDER BY created_at DESC").fetchall()
-
-@app.get("/api/archive/used-topic-ids")
-def used_ids():
-    with db_conn() as c: return {"topic_ids":[r["topic_id"] for r in c.execute("SELECT DISTINCT topic_id FROM posts WHERE topic_id IS NOT NULL").fetchall()]}
-
-@app.get("/api/archive/{post_id}")
-def archive_get(post_id: str):
-    with db_conn() as c:
-        post = c.execute("SELECT id,topic_id,topic,domain,post_type,platform,content,created_at,updated_at FROM posts WHERE id=%s", (post_id,)).fetchone()
-    if not post: raise HTTPException(404, "Ø§Ù„Ù…Ù†Ø´ÙˆØ± ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯")
-    return post
-
-@app.post("/api/archive")
-def archive_save(p: ArchivePost):
-    pid = p.id or str(uuid.uuid4()); now = datetime.now(timezone.utc)
-    with db_conn() as c:
-        c.execute("INSERT INTO posts(id,topic_id,topic,domain,post_type,platform,content,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s) ON CONFLICT(id) DO UPDATE SET content=EXCLUDED.content,updated_at=EXCLUDED.updated_at", (pid,p.topic_id,p.topic,p.domain,p.post_type,p.platform,json.dumps(p.content,ensure_ascii=False),now,now)); c.commit()
-    return {"id":pid,"saved":True}
-
-@app.delete("/api/archive/{post_id}")
-def archive_delete(post_id: str):
-    with db_conn() as c:
-        cur = c.execute("DELETE FROM posts WHERE id=%s", (post_id,)); c.commit(); return {"deleted":cur.rowcount>0}
-
-def demo_payload(req):
-    n = req.slides if req.post_type == "Carousel" else 1
-    return {"mode":"demo","title":req.topic,"hook":req.topic,"caption":"Ù…Ø­ØªÙˆÙ‰ ØªØ¬Ø±ÙŠØ¨ÙŠ.","recommendations":[],"cta":"Ø´Ø§Ø±Ùƒ Ø±Ø£ÙŠÙƒ.","keywords":["GRC"],"hashtags":["#GRC"],"slides":[{"number":i+1,"headline":req.topic,"body":"Ù†Øµ ØªØ¬Ø±ÙŠØ¨ÙŠ."} for i in range(n)],"sources":[]}
-
-@app.post("/api/generate-content")
-def generate_content(req: ContentRequest):
-    if not os.getenv("OPENAI_API_KEY"): return demo_payload(req)
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")); model = os.getenv("OPENAI_MODEL", "gpt-5")
-    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides."
-    kw = {"model":model,"input":prompt,"store":False}
-    if req.use_web_search: kw["tools"]=[{"type":"web_search"}]
-    try:
-        d = extract_json(client.responses.create(**kw).output_text)
-        for slide in d.get("slides", []):
-            for field, limit in (("headline", 9), ("body", 32)):
-                words = str(slide.get(field, "")).split()
-                slide[field] = " ".join(words[:limit]) + ("â€¦" if len(words) > limit else "")
-        d["mode"]="openai"; return d
-    except Exception as e: raise HTTPException(500, f"Generation failed: {e}")
-
-@app.post("/api/extract-news-file")
-async def extract_news_file(request: Request):
-    """Extract an alert entirely in memory; the uploaded bytes are never persisted or archived."""
-    max_bytes = 8 * 1024 * 1024
-    raw = await request.body()
-    if not raw: raise HTTPException(400, "Ø§Ù„Ù…Ù„Ù ÙØ§Ø±Øº")
-    if len(raw) > max_bytes: raise HTTPException(413, "Ø­Ø¬Ù… Ø§Ù„Ù…Ù„Ù ÙŠØªØ¬Ø§ÙˆØ² 8 Ù…ÙŠØ¬Ø§Ø¨Ø§ÙŠØª")
-    filename = unquote(request.headers.get("x-news-filename", "alert.txt"))
-    suffix = Path(filename).suffix.lower()
-    allowed = {".pdf", ".docx", ".txt", ".md", ".csv", ".json"}
-    if suffix not in allowed: raise HTTPException(415, "Ù†ÙˆØ¹ Ø§Ù„Ù…Ù„Ù ØºÙŠØ± Ù…Ø¯Ø¹ÙˆÙ…. Ø§Ø³ØªØ®Ø¯Ù… PDF Ø£Ùˆ DOCX Ø£Ùˆ TXT Ø£Ùˆ MD Ø£Ùˆ CSV Ø£Ùˆ JSON")
-    try:
-        if suffix == ".pdf":
-            if not raw.startswith(b"%PDF"): raise ValueError("ØªÙˆÙ‚ÙŠØ¹ PDF ØºÙŠØ± ØµØ§Ù„Ø­")
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(raw))
-            text = "\n".join((page.extract_text() or "") for page in reader.pages)
-        elif suffix == ".docx":
-            if not zipfile.is_zipfile(io.BytesIO(raw)): raise ValueError("ØªÙˆÙ‚ÙŠØ¹ DOCX ØºÙŠØ± ØµØ§Ù„Ø­")
-            from docx import Document
-            document = Document(io.BytesIO(raw))
-            text = "\n".join(p.text for p in document.paragraphs)
-            for table in document.tables:
-                text += "\n" + "\n".join(" | ".join(cell.text for cell in row.cells) for row in table.rows)
-        else:
-            text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(422, "ØªØ¹Ø°Ø± Ù‚Ø±Ø§Ø¡Ø© ØªØ±Ù…ÙŠØ² Ø§Ù„Ù…Ù„Ù Ø§Ù„Ù†ØµÙŠØ› Ø§Ø­ÙØ¸Ù‡ Ø¨ØªØ±Ù…ÙŠØ² UTF-8")
-    except Exception as exc:
-        raise HTTPException(422, f"ØªØ¹Ø°Ø± Ø§Ø³ØªØ®Ø±Ø§Ø¬ Ø§Ù„Ù†Øµ Ù…Ù† Ø§Ù„Ù…Ù„Ù: {exc}")
-    text = re.sub(r"\r\n?", "\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if len(text) < 10: raise HTTPException(422, "Ù„Ù… ÙŠÙØ¹Ø«Ø± Ø¹Ù„Ù‰ Ù†Øµ Ù‚Ø§Ø¨Ù„ Ù„Ù„Ù‚Ø±Ø§Ø¡Ø©Ø› Ù‚Ø¯ ÙŠÙƒÙˆÙ† Ø§Ù„Ù…Ù„Ù ØµÙˆØ±Ø© Ù…Ù…Ø³ÙˆØ­Ø© Ø¶ÙˆØ¦ÙŠÙ‹Ø§")
-    text = text[:12000]
-    first_line = next((line.strip() for line in text.splitlines() if len(line.strip()) >= 3), "")
-    suggested_title = first_line[:300] if len(first_line) <= 300 else Path(filename).stem[:300]
-    return {"filename":Path(filename).name, "title":suggested_title, "text":text, "stored":False}
-
-@app.post("/api/parse-news")
-def parse_news(req: NewsParseRequest):
-    if not os.getenv("OPENAI_API_KEY"): raise HTTPException(400, "OPENAI_API_KEY is not configured")
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")); model = os.getenv("OPENAI_MODEL", "gpt-5")
-    prompt = f'''You are the editorial intelligence engine for the Arabic cybersecurity publication "Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ | CYBER PULSE".
-Parse ONLY supplied facts. Never invent or silently correct CVEs, dates, severity, vendors, sources or recommendations.
-HEADLINE:\n{req.title}\n\nPASTED NEWS:\n{req.news}
-Find the exact original article/advisory page on the named source website when possible. The date field MUST be the publication date displayed by that source page, never today's date, the date of analysis, or an inferred date. Return an empty date if the original publication date cannot be verified.
-Return ONLY valid JSON with: headline, severity (Ø­Ø±Ø¬/Ø¹Ø§Ù„ÙŠ/Ù…ØªÙˆØ³Ø·/Ù…Ù†Ø®ÙØ¶/or empty), date, date_verified (boolean), source_url (direct exact article URL or empty), cve, summary (2-3 concise Arabic sentences), recommendations (only supplied), source, entities, threat_type, visual_brief, caption, hashtags.
-For visual_brief, describe ONE direct, literal editorial scene that immediately identifies the affected technology, vendor/product category, and the reported action or risk. Prefer recognizable product geometry, device/server context, patch/update objects, cloud/email/browser/mobile cues, or incident-specific objects that are explicitly supported by the supplied news. Do NOT replace the subject with a loose metaphor. For example, software patches must look like software update/patch deployment, never plumbing, water leaks, bandages, construction, tools, or physical repair. The brief MUST NOT request readable words, interface labels, captions, diagrams, flowcharts, logos containing text, letters or numbers. It may request simplified non-readable interface shapes only when the story is specifically about software, updates, identity, cloud, email, browsers, or mobile apps.
-Caption must be one polished, self-contained Arabic post ready to paste into BOTH LinkedIn and Instagram. Use 140-260 words and rely only on supplied facts.
-Format the caption as readable social copy using plain text and intentional line breaks:
-1. Open with a strong, factual hook or headline (no clickbait).
-2. Add a short paragraph explaining what happened and why it matters.
-3. Break key facts into 2-5 short lines beginning with ğŸ”¹ when the supplied material supports distinct facts such as the affected product/sector, vulnerability or attack method, impact, severity, CVE, or date. Never create a bullet merely to fill the structure.
-4. If recommendations were supplied, introduce them with "Ù…Ø§ Ø§Ù„Ø°ÙŠ ÙŠØ¬Ø¨ ÙØ¹Ù„Ù‡ØŸ" and list each action on a separate line beginning with âœ…. If none were supplied, omit this section completely.
-5. Add "Ø§Ù„Ø®Ù„Ø§ØµØ©:" followed by one concise practical takeaway based only on the supplied facts.
-6. End with one natural engagement question or call to action, then place @cyberpulse_ar on its own line.
-Keep paragraphs short, professional, direct, RTL-friendly, and easy to scan on mobile. Do not use Markdown headings, asterisks, numbered lists, excessive emojis, or hashtags inside caption.
-Hashtags must be a JSON array of 6-10 concise Arabic or English hashtags relevant to the supplied story, each beginning with #. Always include #Ù†Ø¨Ø¶_Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ and #Ø§Ù„Ø£Ù…Ù†_Ø§Ù„Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ.'''
-    try:
-        parsed = extract_json(client.responses.create(model=model, input=prompt, tools=[{"type":"web_search"}], store=False).output_text)
-        source_url = str(parsed.get("source_url", "")).strip()
-        pasted_urls = re.findall(r'https?://[^\s<>"\']+', req.news)
-        candidate_urls = pasted_urls + ([source_url] if source_url else [])
-        verified_date, verified_url = "", ""
-        for candidate in candidate_urls:
-            candidate = candidate.rstrip(".,ØŒØ›;:!?)]}")
-            if not url_is_approved(candidate):
-                continue
-            verified_date = source_publication_date(candidate)
-            if verified_date:
-                verified_url = candidate
-                break
-        if verified_date:
-            parsed["date"] = verified_date
-            parsed["date_verified"] = True
-            parsed["source_url"] = verified_url
-        else:
-            parsed["date_verified"] = bool(parsed.get("date_verified") and source_url and url_is_approved(source_url))
-            if not parsed["date_verified"]:
-                parsed["date"] = ""
-        return parsed
-    except Exception as e: raise HTTPException(500, f"News parsing failed: {e}")
-
-ARABIC_MONTHS = {
-    1:"ÙŠÙ†Ø§ÙŠØ±", 2:"ÙØ¨Ø±Ø§ÙŠØ±", 3:"Ù…Ø§Ø±Ø³", 4:"Ø£Ø¨Ø±ÙŠÙ„", 5:"Ù…Ø§ÙŠÙˆ", 6:"ÙŠÙˆÙ†ÙŠÙˆ",
-    7:"ÙŠÙˆÙ„ÙŠÙˆ", 8:"Ø£ØºØ³Ø·Ø³", 9:"Ø³Ø¨ØªÙ…Ø¨Ø±", 10:"Ø£ÙƒØªÙˆØ¨Ø±", 11:"Ù†ÙˆÙÙ…Ø¨Ø±", 12:"Ø¯ÙŠØ³Ù…Ø¨Ø±",
-}
-
-def _format_source_date(value: str) -> str:
-    raw = html.unescape(str(value or "")).strip()
-    if not raw:
-        return ""
-    iso = raw.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(iso)
-        return f"{dt.day} {ARABIC_MONTHS[dt.month]} {dt.year}"
-    except ValueError:
-        pass
-    match = re.search(r'\b(20\d{2})-(\d{1,2})-(\d{1,2})\b', raw)
-    if match:
-        year, month, day = map(int, match.groups())
-        if month in ARABIC_MONTHS:
-            return f"{day} {ARABIC_MONTHS[month]} {year}"
-    return raw[:80]
-
-def source_publication_date(url: str) -> str:
-    try:
-        with httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True) as client:
-            response = client.get(url, headers={"User-Agent":"Mozilla/5.0 CyberPulseBot/1.0"})
-            response.raise_for_status()
-        page = response.text[:2_000_000]
-        patterns = [
-            r'<meta[^>]+(?:property|name)=["\']article:published_time["\'][^>]+content=["\']([^"\']+)',
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']article:published_time["\']',
-            r'<meta[^>]+(?:property|name)=["\'](?:datePublished|date|pubdate|publish-date)["\'][^>]+content=["\']([^"\']+)',
-            r'["\']datePublished["\']\s*:\s*["\']([^"\']+)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, page, re.IGNORECASE)
-            if match:
-                return _format_source_date(match.group(1))
-    except Exception:
-        return ""
-    return ""
-
-def visual_prompt(req: ImageRequest):
-    if req.visual_style == "Cyber Pulse":
-        story = f"{req.title} {req.body} {req.visual_direction}".lower()
-        zoom_contract = ""
-        if "zoom" in story or "Ø²ÙˆÙˆÙ…" in story:
-            zoom_contract = '''\nMANDATORY ZOOM ANNOTATION VISUAL CONTRACT: show a recognizable modern video-meeting scene with several participant tiles; a shared-screen canvas; a clearly visible annotation pen/drawing stroke/cursor acting on that shared canvas; and an unauthorized-control path spreading from the annotated shared screen toward two or more participant laptops/devices. Use red only for the hostile control path and cyan/blue for the legitimate meeting. A generic laptop, generic participant grid, large arrow, isolated user icon, update window, download screen, or single-device warning is NOT sufficient. Do not generate readable Zoom text or logos; communicate the platform through its familiar blue video-meeting visual language and meeting layout.\n'''
-        variant_contracts = {
-            1: "VARIANT 1 â€” DIRECT CAUSAL SCENE: use one dominant focal point and a clear visual path from the vulnerable technology/action to the impact.",
-            2: "VARIANT 2 â€” SPLIT EDITORIAL SCENE: use a clearly divided but cinematic source-versus-impact or before-versus-after composition, connected by the exact attack/risk mechanism.",
-            3: "VARIANT 3 â€” ENTERPRISE CONTEXT SCENE: place the exact technology and mechanism inside a realistic enterprise environment with people/devices where relevant, while keeping the technical cause and impact unmistakable.",
-        }
-        variant_contract = variant_contracts[req.variant_index]
-        return f'''Create ONLY the visual background artwork for a premium cybersecurity news post. Before composing, identify the exact subject, affected technology/vendor category, event, and risk mechanism from the supplied title, context, and visual direction.
-FORMAT: vertical Instagram 4:5 portrait.
-{variant_contract}
-This composition must be substantially different from the other variants while preserving the same factual story and Cyber Pulse identity.
-BRAND VISUAL SYSTEM: deep black/dark navy #050B12, Cyber Blue #0A84FF, Cyan #00D1C7. Red only when the supplied risk is high/critical. Subtle circuit patterns, restrained digital grid, soft blue/cyan atmospheric glow. Premium enterprise cybersecurity media publication quality, sophisticated and minimal, never gaming-like.
-SEMANTIC ACCURACY IS THE HIGHEST PRIORITY: represent the news subject directly and literally. Every prominent object must be traceable to the supplied story. Show the affected technology and the reported action/risk in one coherent scene. Do not invent an unrelated visual metaphor. If the story is about software updates or security patches, show an update/patch deployment environment, recognizable software/platform geometry, prioritized critical update objects, protected enterprise devices or servers, and security status cues. Never translate "patch", "leak", "bug", "cloud", "virus", "worm", "gateway", or similar technical terms into unrelated physical objects unless the supplied story is actually about those physical objects.
-STRICT COMPOSITION: Build a cinematic explanatory editorial scene, not a generic stock-style cybersecurity image. The scene must visually tell the incident in one glance: affected platform/context -> vulnerable feature or action -> visible impact on the affected devices. Use depth, clear focal hierarchy, realistic enterprise people/devices where relevant, and precise cyan-versus-red visual causality. Concentrate the explanatory action in the center/lower 55-60%. Preserve a genuinely empty, dark, low-detail text-safe editorial panel across the upper 35-40%; no faces, bright objects, interface panels, attack paths, or important details may enter that panel. Keep additional safe space at the top-right for the Cyber Pulse logo.
-ABSOLUTE NO-TEXT RULE: ZERO readable Arabic or English, words, letters, numbers, CVEs, product names, UI labels, captions, headlines, hashtags, watermarks, signatures, brand names, pseudo-text or typographic logo marks.
-Simplified non-readable interface panels, update progress shapes, product geometry, patch tiles, device screens, and security-status cards are allowed only when they directly clarify the supplied story. They must contain no text or pseudo-text.
-DO NOT CREATE flowcharts, generic dashboards unrelated to the story, browser directory lists, dense tables, hacker hoodies, masks, skulls, Matrix code, random binary streams, plumbing, water leaks, bandages, construction tools, repair tools, or clutter unless explicitly required by the factual story.
-DIRECT VISUAL BRIEF: {req.visual_direction}
-NEWS TITLE: {req.title}
-FACTUAL CONTEXT: {req.body}
-{zoom_contract}
-Final self-check before rendering: (1) would a viewer identify the technology and event without reading the headline, (2) can the viewer follow the attack or risk mechanism from its origin to its impact, and (3) does the image have a clear editorial hierarchy rather than merely containing the right objects? If any answer is no, revise before rendering.'''
-    common = f"Artwork only, 4:5 portrait. Concept: {req.title}. Context: {req.body}. ABSOLUTE: zero readable text, letters, numbers, labels, headings, framework names, interface copy, hashtags, watermarks or pseudo-text. Do not create a labeled infographic, poster, slide, diagram with captions, or text-bearing UI. Reserve the top 28% as a clean low-detail typography-safe zone and the bottom 22% as another clean low-detail typography-safe zone. Place the single main visual subject only in the central 50%, fully visible and not cropped. {req.visual_direction}"
-    if req.domain.strip().upper() == "GRC": style = "Premium light government/enterprise GRC editorial illustration; white/cool-gray; navy/royal blue; restrained green/orange/red status accents; one strong central symbolic scene using polished enterprise vector/semi-3D objects; no internal labels, no multi-panel infographic, no repeated mini diagrams, generous whitespace, no hacker clichÃ©s."
-    elif req.visual_style == "Executive Minimal": style = "Executive minimal artwork, white background, navy/blue, strong central metaphor, whitespace."
-    else: style = "Structured professional infographic artwork, light background, central concept and restrained supporting visuals."
-    return style + "\n" + common
-
-def review_artwork(client: OpenAI, req: ImageRequest, image_b64: str):
-    review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity publication "Ù†Ø¨Ø¶ Ø³ÙŠØ¨Ø±Ø§Ù†ÙŠ | CYBER PULSE".
-Evaluate the supplied generated artwork against the factual news context. Review the IMAGE itself, not merely the prompt.
-Use ONLY the supplied news title, factual context, and required visual direction. Never require an object, screen, feature, update window, download, patch, vendor, or attack step that is not supported by this specific story. Do not carry requirements from another cybersecurity story.
-
-NEWS TITLE: {req.title}
-FACTUAL CONTEXT: {req.body}
-REQUIRED VISUAL DIRECTION: {req.visual_direction}
-
-Score these criteria:
-1. The affected technology/vendor/product category is immediately identifiable without headline text.
-2. The reported event or attack mechanism is visually clear and technically relevant.
-3. Every prominent object is traceable to the supplied story; there are no loose or misleading metaphors.
-4. The scene has premium Cyber Pulse editorial quality: dark navy, cyan/teal, restrained risk red, clean and professional.
-5. The upper 35-40% remains usable for Arabic headline and metadata, and the top-right has safe logo space.
-6. There is no readable generated text, pseudo-text, watermark, distorted typography, hacker hoodie, or unrelated clutter.
-7. The image explains a causal story, not merely a collection of relevant objects: the origin/action, path or mechanism, and impact are visually connected.
-8. The composition has editorial hierarchy and cinematic depth comparable to a premium technology-news cover: one dominant focal point, supporting context, and no stock-photo/generic-dashboard feeling.
-
-For Zoom Annotation / screen-sharing takeover stories specifically, a strong image should clearly show a video meeting with several participants, a shared-screen canvas, an annotation pen/drawing stroke/cursor acting on that shared screen, and unauthorized control spreading from the annotated screen toward two or more participant devices. A generic laptop, generic meeting grid, arrow, user icon, software-update window, or download screen is insufficient and must not be requested.
-
-Return ONLY valid JSON:
-{{"semantic_match":true,"score":0,"technology_visible":true,"mechanism_visible":true,"composition_ok":true,"issues":["concise issue"],"retry_direction":"specific English correction prompt for the image generator","summary_ar":"Ø³Ø·Ø± Ø¹Ø±Ø¨ÙŠ Ù…Ø®ØªØµØ± ÙŠØ´Ø±Ø­ Ù†ØªÙŠØ¬Ø© Ø§Ù„Ù…Ø±Ø§Ø¬Ø¹Ø©"}}
-Set semantic_match=true only when score is at least 82 and technology_visible, mechanism_visible, and composition_ok are all true. A visually generic image cannot pass even if it contains the correct platform and objects.'''
-    response = client.responses.create(
-        model=os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-5")),
-        input=[{"role":"user","content":[
-            {"type":"input_text","text":review_prompt},
-            {"type":"input_image","image_url":f"data:image/jpeg;base64,{image_b64}"},
-        ]}],
-        store=False,
-    )
-    review = extract_json(response.output_text)
-    score = max(0, min(100, int(review.get("score", 0))))
-    review["score"] = score
-    review["semantic_match"] = bool(
-        review.get("semantic_match") and score >= 82
-        and review.get("technology_visible") and review.get("mechanism_visible")
-        and review.get("composition_ok")
-    )
-    return review
-
-def _find_gemini_image_data(value: Any) -> str:
-    if isinstance(value, dict):
-        output_image = value.get("output_image")
-        if isinstance(output_image, dict) and output_image.get("data"):
-            return str(output_image["data"])
-        if value.get("type") == "image" and value.get("data"):
-            return str(value["data"])
-        for child in value.values():
-            found = _find_gemini_image_data(child)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = _find_gemini_image_data(child)
-            if found:
-                return found
-    return ""
-
-def generate_nano_banana_image(prompt: str, aspect_ratio: str = "4:5") -> tuple[str, str]:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not configured")
-    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
-    payload = {
-        "model": model,
-        "input": [{"type": "text", "text": prompt}],
-        "response_format": {
-            "type": "image",
-            "mime_type": "image/jpeg",
-            "aspect_ratio": aspect_ratio,
-            "image_size": os.getenv("GEMINI_IMAGE_SIZE", "1K"),
-        },
-    }
-    with httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
-        response = client.post(
-            "https://generativelanguage.googleapis.com/v1beta/interactions",
-            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-            json=payload,
-        )
-        if not response.is_success:
-            try:
-                detail = response.json().get("error", {}).get("message", response.text)
-            except Exception:
-                detail = response.text
-            raise ValueError(f"Nano Banana request failed ({response.status_code}): {str(detail)[:500]}")
-        data = response.json()
-    image_b64 = _find_gemini_image_data(data)
-    if not image_b64:
-        raise ValueError("Nano Banana returned no image data")
-    return image_b64, model
-
-def generate_openai_image(prompt: str) -> tuple[str, str]:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured")
-    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
-    response = OpenAI(api_key=api_key, timeout=300).images.generate(
-        model=model,
-        prompt=prompt,
-        size="1024x1536",
-        quality=os.getenv("OPENAI_IMAGE_QUALITY", "medium").strip(),
-        output_format="jpeg",
-        n=1,
-    )
-    item = response.data[0] if response.data else None
-    image_b64 = getattr(item, "b64_json", "") if item else ""
-    if not image_b64 and item and getattr(item, "url", ""):
-        image_response = httpx.get(item.url, timeout=120, follow_redirects=True)
-        image_response.raise_for_status()
-        image_b64 = base64.b64encode(image_response.content).decode("ascii")
-    if not image_b64:
-        raise ValueError("OpenAI returned no image data")
-    return image_b64, model
-
-def _is_quota_error(error: Exception):
-    message = str(error).lower()
-    return any(marker in message for marker in ("quota", "429", "resource_exhausted", "rate limit", "rate_limit", "exceeded"))
-
-@app.post("/api/generate-image")
-def generate_image(req: ImageRequest):
-    if not os.getenv("GEMINI_API_KEY") and not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(400, "Ù„Ù… ÙŠØªÙ… Ø¥Ø¹Ø¯Ø§Ø¯ Ø£ÙŠ Ù…Ø²ÙˆØ¯ Ù„ØªÙˆÙ„ÙŠØ¯ Ø§Ù„ØµÙˆØ±")
-    try:
-        base_prompt = visual_prompt(req)
-        image_provider = "openai"
-        fallback_used = False
-        fallback_reason = ""
-        if os.getenv("GEMINI_API_KEY"):
-            try:
-                image_b64, image_model = generate_nano_banana_image(base_prompt)
-                image_provider = "google_nano_banana_2"
-            except Exception as gemini_error:
-                if not os.getenv("OPENAI_API_KEY"):
-                    raise
-                fallback_used = True
-                fallback_reason = "gemini_quota" if _is_quota_error(gemini_error) else "gemini_error"
-                image_b64, image_model = generate_openai_image(base_prompt)
-        else:
-            image_b64, image_model = generate_openai_image(base_prompt)
-        if os.getenv("OPENAI_API_KEY"):
-            try:
-                review = review_artwork(OpenAI(api_key=os.getenv("OPENAI_API_KEY")), req, image_b64)
-            except Exception as review_error:
-                review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"ØªØ¹Ø°Ø± ØªÙ†ÙÙŠØ° Ø§Ù„Ù…Ø±Ø§Ø¬Ø¹Ø© Ø§Ù„Ø¨ØµØ±ÙŠØ©ØŒ ÙˆØªÙ… Ø§Ù„Ø§Ø­ØªÙØ§Ø¸ Ø¨Ø§Ù„ØµÙˆØ±Ø© Ø§Ù„Ù…ÙˆÙ„Ø¯Ø©.","review_error":str(review_error)[:300]}
-        else:
-            review = {"semantic_match":None,"score":None,"issues":[],"retry_direction":"","summary_ar":"Ù„Ù… ØªÙÙ†ÙØ° Ø§Ù„Ù…Ø±Ø§Ø¬Ø¹Ø© Ø§Ù„Ø¨ØµØ±ÙŠØ© Ù„Ø£Ù† OPENAI_API_KEY ØºÙŠØ± Ù…Ù‡ÙŠØ£."}
-        return {"b64_json":image_b64,"mime_type":"image/jpeg","slide_number":req.slide_number,"visual_style":req.visual_style,"font":"Cairo","overlay_required":True,"hashtags_in_image":False,"artwork_version":"single-image-provider-fallback-v10","generation_attempts":1,"variant_index":req.variant_index,"image_provider":image_provider,"image_model":image_model,"fallback_used":fallback_used,"fallback_reason":fallback_reason,"semantic_review":review}
-    except Exception as e: raise HTTPException(500, f"Image generation failed: {e}")
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíã­¶é:-jZ.¶›­–)Ş³V–×÷'B&6Sc@¦–×÷'B†6†Æ– ¦–×÷'B†Ö0¦–×÷'B‡FÖÀ¦–×÷'B–ğ¦–×÷'B—FW'FööÇ0¦–×÷'B§6öà¦–×÷'BÖF€¦–×÷'B÷0¦–×÷'B&P¦–×÷'B6V7&WG0¦–×÷'B6‡WF–À¦–×÷'B7V'&ö6W70¦–×÷'BWV–@¦–×÷'BF‡&VF–æp¦–×÷'BFV×f–ÆP¦–×÷'BF–ÖP¦–×÷'BvfP¦–×÷'B¦—f–ÆP¦g&öÒFFWF–ÖR–×÷'BFFWF–ÖRÂF–ÖW¦öæRÂFFRÂF–ÖVFVÇF¦g&öÒF†Æ–"–×÷'BF€¦g&öÒG—–ær–×÷'BÆ—FW&ÂÂç¦g&öÒW&ÆÆ–"ç'6R–×÷'BVçV÷FRÂW&Ç'6RÂW&ÆVæ6öFRÂV÷FP ¦–×÷'B7–6÷p¦–×÷'B‡GG€¦g&öÒ7–6÷rç&÷w2–×÷'BF–7E÷&÷p¦g&öÒf7F’–×÷'Bf7D’Â…EEW†6WF–öâÂ&WVW7BÂWÆöDf–ÆRÂf–ÆP¦g&öÒf7F’æÖ–FFÆWv&Ræ6÷'2–×÷'B4õ%4Ö–FFÆWv&P¦g&öÒf7F’ç&W7öç6W2–×÷'Bf–ÆU&W7öç6RÂ¥4ôå&W7öç6RÂ&W7öç6RÂ&VF—&V7E&W7öç6P¦g&öÒ7'—Föw&‡’æfW&æWB–×÷'BfW&æWBÂ–çfÆ–EFö¶Và¦g&öÒ–FçF–2–×÷'B&6TÖöFVÂÂf–VÆ@¦g&öÒ÷Væ’–×÷'B÷Vä ¦Òf7D’‡F—FÆSÒ$uB7–&W"6öçFVçB’"ÂfW'6–öãÒ#ãS"ã"¦æFEöÖ–FFÆWv&R„4õ%4Ö–FFÆWv&RÂÆÆ÷uö÷&–v–ç3Õ²"¢%ÒÂÆÆ÷uö7&VFVçF–Ç3ÔfÇ6RÂÆÆ÷uöÖWF†öG3Õ²"¢%ÒÂÆÆ÷uö†VFW'3Õ²"¢%Ò¤$4UôD•"ÒF‚…õöf–ÆUõò’ç&W6öÇfR‚’ç&Vç@¤”äDU…ôd”ÄRÒ$4UôD•"ò&–æFW‚æ‡FÖÂ ¤Ôô$”ÄUô¥2Ò$4UôD•"ò&Öö&–ÆRÖF÷væÆöBæ§2 ¤äUu5õ4T$4…ô¥2Ò$4UôD•"ò&æWw2×6V&6‚æ§2 ¥d•5TÅôÄU%Eô¥2Ò$4UôD•"ò'f—7VÂÖÆW'Bæ§2 ¤Ä”ä´TD”åô¥2Ò$4UôD•"ò&Æ–æ¶VF–âæ§2 ¤5”$U%õ4õU$4U5ôd”ÄRÒ$4UôD•"ò&7–&W%÷6÷W&6W2æ§6öâ ¤UD…ôU„TÕEõD…2Ò²"ö†VÇF‚"Â"öWF‚öÆ–æ¶VF–âö6ÆÆ&6²'Ğ ¦6Æ726öçFVçE&WVW7B„&6TÖöFVÂ“ ¢F÷–3¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓ3¢FöÖ–ã¢Æ—FW&Å²$u$2"Â$7–&W'6V7W&—G’"Â$’v÷fW&ææ6R"Â%&—f7’%ÒÒ$u$2 ¢÷7E÷G—S¢Æ—FW&Å²$6&÷W6VÂ"Â$–æföw&†–2"Â%6–ævÆR÷7B%ÒÒ$6&÷W6VÂ ¢ÆFf÷&Ó¢Æ—FW&Å²$–ç7Fw&Ò"Â$Æ–æ¶VD–â"Â$&÷F‚%ÒÒ$&÷F‚ ¢VF–Væ6S¢7G"Ò$v÷fW&æÖVçBæBVçFW'&—6R7–&W'6V7W&—G’&öfW76–öæÇ2 ¢ÆæwVvS¢Æ—FW&Å²$&&–2"Â$VævÆ—6‚%ÒÒ$&&–2 ¢6Æ–FW3¢–çBÒf–VÆB†FVfVÇCÓbÂvSÓÂÆSÓ¢FöæS¢7G"Ò%&öfW76–öæÂÂ&7F–6ÂÂW†V7WF—fRÖg&–VæFÇ’ ¢W6U÷vV%÷6V&6ƒ¢&ööÂÒfÇ6P ¦6Æ72–ÖvU&WVW7B„&6TÖöFVÂ“ ¢F—FÆS¢7G ¢&öG“¢7G"Ò" ¢6Æ–FUöçVÖ&W#¢–çBÒ¢÷7E÷G—S¢Æ—FW&Å²$6&÷W6VÂ"Â$–æföw&†–2"Â%6–ævÆR÷7B%ÒÒ%6–ævÆR÷7B ¢FöÖ–ã¢7G"Ò$u$2 ¢f—7VÅ÷7G–ÆS¢Æ—FW&Å²$u$2&öfW76–öæÂ"Â$7–&W"VÇ6R"Â$W†V7WF—fRÖ–æ–ÖÂ"Â$–æföw&†–2%ÒÒ$u$2&öfW76–öæÂ ¢f—7VÅöF—&V7F–öã¢7G"Ò" ¢f&–çEö–æFWƒ¢–çBÒf–VÆB†FVfVÇCÓÂvSÓÂÆSÓ2 ¦6Æ72æWw5'6U&WVW7B„&6TÖöFVÂ“ ¢F—FÆS¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓS¢æWw3¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓÂÖ…öÆVæwFƒÓ# ¦6Æ72æWw56V&6…&WVW7B„&6TÖöFVÂ“ ¢F—3¢–çBÒf–VÆB†FVfVÇCÓrÂvSÓÂÆSÓ3¢Æ–Ö—C¢–çBÒf–VÆB†FVfVÇCÓ‚ÂvSÓÂÆSÓ" ¦6Æ72æWw5f–FVõ&WVW7B„&6TÖöFVÂ“ ¢†VFÆ–æS¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓS¢7VÖÖ'“¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓÂÖ…öÆVæwFƒÓ3¢F‡&VE÷G—S¢7G"Òf–VÆB†FVfVÇCÒ-ŠíŠ‹‹=˜­Š‹Š}˜m˜¢"ÂÖ…öÆVæwFƒÓ#¢f—7VÅö'&–Vc¢7G"Òf–VÆB†FVfVÇCÒ""ÂÖ…öÆVæwFƒÓ#¢7G–ÆS¢Æ—FW&Å²$'&V¶–æræWw2"Â$7–&W"v&VæW72"Â$u$2%ÒÒ$'&V¶–æræWw2 ¢GW&F–öã¢Æ—FW&Å³RÂÂUÒÒP ¦6Æ72f—7VÄÆW'E&WVW7B„&6TÖöFVÂ“ ¢F—FÆS¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓS¢6öçFVçC¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓÂÖ…öÆVæwFƒÓ#¢&WV—&VEö7F–öã¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓC¢f—7VÅ÷7G–ÆS¢Æ—FW&Å²$WFò"Â$6–æVÖF–2’"Â%4ô2÷W&F–öç2"Â$W†V7WF—fRu$2"Â$7–&W"v&VæW72%ÒÒ$6–æVÖF–2’ ¢F‡&VE÷f—7VÅ÷7G–ÆS¢Æ—FW&Å²$WFò'’6öçFVçB"Â%v&æ–ær67&VVç2"Â$Öö&–ÆRÆW'G2"Â%7—7FVÒW'&÷'2æBWFFW2"Â$6öæ6W&æVBW6W""Â$æöç–Ö÷W2†6¶W""Â$Ö—†VB7–&W"F‡&VG2%ÒÒ$WFò'’6öçFVçB ¢f–FVõö6÷VçC¢Æ—FW&Å³ÂÂ5ÒÒ ¦6Æ72f—7VÄ–FV&WVW7B„&6TÖöFVÂ“ ¢–FV¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓc ¦6Æ72f—7VÄ&÷fÅ&WVW7B„&6TÖöFVÂ“ ¢76WEö÷&FW#¢Æ—7E·7G%ÒÒf–VÆB†FVfVÇEöf7F÷'“ÖÆ—7BÂÖ…öÆVæwFƒÓb¢Ö÷F–öåö÷fW&Æ—3¢&ööÂÒfÇ6P ¦6Æ72f—7VÅ6fU&WVW7B„&6TÖöFVÂ“ ¢F—FÆS¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓS¢6öçFVçC¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓÂÖ…öÆVæwFƒÓ#¢&WV—&VEö7F–öã¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓC¢f÷&ÖGFVEö6öçFVçC¢7G"Òf–VÆB†FVfVÇCÒ""ÂÖ…öÆVæwFƒÓc ¦6Æ72&6†—fU÷7B„&6TÖöFVÂ“ ¢–C¢7G"ÂæöæRÒæöæP¢F÷–5ö–C¢–çBÂæöæRÒæöæP¢F÷–3¢7G ¢FöÖ–ã¢7G"Ò$u$2 ¢÷7E÷G—S¢7G"Ò$6&÷W6VÂ ¢ÆFf÷&Ó¢7G"Ò$&÷F‚ ¢6öçFVçC¢F–7E·7G"Âç•Ğ ¦6Æ72Æ–æ¶VD–ä–ÖvR„&6TÖöFVÂ“ ¢–ÖvUö#cC¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓÂÖ…öÆVæwFƒÓ…óó¢–ÖvUöÖ–ÖU÷G—S¢Æ—FW&Å²&–ÖvRö§Vr"Â&–ÖvR÷ær%ÒÒ&–ÖvRö§Vr ¢ÇE÷FW‡C¢7G"Òf–VÆB†FVfVÇCÒ""ÂÖ…öÆVæwFƒÓ# ¦6Æ72Æ–æ¶VD–åV&Æ—6…&WVW7B„&6TÖöFVÂ“ ¢FW‡C¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓÂÖ…öÆVæwFƒÓ3¢–ÖvUö#cC¢7G"Òf–VÆB†FVfVÇCÒ""ÂÖ…öÆVæwFƒÓ…óó¢–ÖvUöÖ–ÖU÷G—S¢Æ—FW&Å²&–ÖvRö§Vr"Â&–ÖvR÷ær%ÒÒ&–ÖvRö§Vr ¢–ÖvW3¢Æ—7E´Æ–æ¶VD–ä–ÖvUÒÒf–VÆB†FVfVÇEöf7F÷'“ÖÆ—7BÂÖ…öÆVæwFƒÓ# ¦6Æ727W÷'F–ætf–ÆTvVæW&FU&WVW7B„&6TÖöFVÂ“ ¢÷7Eö–C¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓ#¢÷7E÷F—FÆS¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓS¢÷7E÷FW‡C¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ#ÂÖ…öÆVæwFƒÓ#¢–ÆÆ#¢7G"Òf–VÆB†FVfVÇCÒ$u$2"ÂÖ…öÆVæwFƒÓ#¢f–ÆU÷G—S¢Æ—FW&Å²-Šı˜M˜­˜B‹˜]˜M˜¢"Â-˜-Š}Šm˜]Š’Š­Šİ˜-˜""Â-˜]˜MŠí‹RŠ­˜m˜˜­‹˜¢"Â-˜m˜]˜‹ŠÂ‹˜]˜B%ÒÒ-Šı˜M˜­˜B‹˜]˜M˜¢  ¦6Æ727W÷'F–ætf–ÆUWFFU&WVW7B„&6TÖöFVÂ“ ¢F—FÆS¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓ2ÂÖ…öÆVæwFƒÓS¢6öçFVçC¢7G"Òf–VÆB†Ö–åöÆVæwFƒÓSÂÖ…öÆVæwFƒÓ3 ¦FVbFF&6U÷W&Â‚“¢&WGW&â÷2ævWFVçb‚$DD$4UõU$Â" ¥d”DTõô¤ô%3¢F–7E·7G"ÂF–7E·7G"Âç•ÕÒÒ·Ğ¥d”DTõô¤ô%5ôÄô4²ÒF‡&VF–æräÆö6²‚¥d•5TÅôÄU%Eô¤ô%3¢F–7E·7G"ÂF–7E·7G"Âç•ÕÒÒ·Ğ¥d•5TÅôÄU%Eô¤ô%5ôÄô4²ÒF‡&VF–æräÆö6²‚¦FVbF%ö6öæâ‚“ ¢–bæ÷BFF&6U÷W&Â‚“¢&—6R…EEW†6WF–öâƒS2Â$DD$4UõU$Â—2æ÷B6öæf–wW&VB"¢&WGW&â7–6÷ræ6öææV7B†FF&6U÷W&Â‚’Â&÷uöf7F÷'“ÖF–7E÷&÷r ¦FVbÆöEö7–&W%÷6÷W&6W2‚“ ¢G'“ ¢&WGW&â§6öâæÆöG2„5”$U%õ4õU$4U5ôd”ÄRç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’¢W†6WBW†6WF–öã ¢&WGW&âµĞ ¦FVb6÷W&6Uö†÷7G2‚“ ¢†÷7G2Ò6WB‚¢f÷"7&2–âÆöEö7–&W%÷6÷W&6W2‚“ ¢†÷7BÒW&Ç'6R‡7&2ævWB‚'W&Â"Â""’’æ†÷7FæÖP¢–b†÷7C ¢†÷7G2æFB††÷7BæÆ÷vW"‚’ç&VÖ÷fW&Vf—‚‚'wwrâ"’¢&WGW&â†÷7G0 ¦FVbW&Åö—5ö&÷fVB‡W&Ã¢7G"“ ¢G'“ ¢†÷7BÒ‡W&Ç'6R‡W&Â’æ†÷7FæÖR÷"""’æÆ÷vW"‚’ç&VÖ÷fW&Vf—‚‚'wwrâ"¢&WGW&âç’††÷7BÓÒÆÆ÷vVB÷"†÷7BæVæG7v—F‚‚"â"²ÆÆ÷vVB’f÷"ÆÆ÷vVB–â6÷W&6Uö†÷7G2‚’¢W†6WBW†6WF–öã ¢&WGW&âfÇ6P ¦FVb†6…÷77v÷&B‡77v÷&BÂ6ÇCÔæöæR“ ¢6ÇBÒ6ÇB÷"6V7&WG2çFö¶Våö'—FW2ƒb¢F–vW7BÒ†6†Æ–"ç&¶Fc%ö†Ö2‚'6†#Sb"Â77v÷&BæVæ6öFR‚’Â6ÇBÂ3¢&WGW&â&6ScBæ#cFVæ6öFR‡6ÇB’æFV6öFR‚’Â&6ScBæ#cFVæ6öFR†F–vW7B’æFV6öFR‚ ¦FVbfW&–g•÷77v÷&B‡77v÷&BÂ6ÇEö#cBÂ†6…ö#cB“ ¢G'“ ¢&WGW&â†Ö2æ6ö×&UöF–vW7B††6†Æ–"ç&¶Fc%ö†Ö2‚'6†#Sb"Â77v÷&BæVæ6öFR‚’Â&6ScBæ#cFFV6öFR‡6ÇEö#cB’Â3’Â&6ScBæ#cFFV6öFR††6…ö#cB’¢W†6WBW†6WF–öã ¢&WGW&âfÇ6P ¦FVb–æ—EöF"‚“ ¢–bæ÷BFF&6U÷W&Â‚“¢&WGW&à¢v—F‚7–6÷ræ6öææV7B†FF&6U÷W&Â‚’’26öæã ¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2÷7G2†–BDU…B$”Ô%’´U’ÇF÷–5ö–B”åDTtU"ÇF÷–2DU…BäõBåTÄÂÆFöÖ–âDU…BäõBåTÄÂÇ÷7E÷G—RDU…BäõBåTÄÂÇÆFf÷&ÒDU…BäõBåTÄÂÆ6öçFVçB¥4ôä"äõBåTÄÂÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’ÇWFFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDR”äDU‚”bäõBU„•5E2–G…÷÷7G5÷F÷–5ö–Bôâ÷7G2‡F÷–5ö–B’"¢6öæâæW†V7WFR‚$5$TDR”äDU‚”bäõBU„•5E2–G…÷÷7G5ö7&VFVEöBôâ÷7G2†7&VFVEöBDU42’"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2W6W'2†–BDU…B$”Ô%’´U’ÇW6W&æÖRDU…BTä•TRäõBåTÄÂÇ77v÷&E÷6ÇBDU…BäõBåTÄÂÇ77v÷&Eö†6‚DU…BäõBåTÄÂÆ—5ö7F—fR$ôôÄTâäõBåTÄÂDTdTÅBE%TRÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’ÇWFFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2f—7VÅöÆW'Eö&6†—fW2†–BDU…B$”Ô%’´U’ÇF—FÆRDU…BäõBåTÄÂÆ6öçFVçBDU…BäõBåTÄÂÇ&WV—&VEö7F–öâDU…BäõBåTÄÂÆf÷&ÖGFVEö6öçFVçBDU…BäõBåTÄÂDTdTÅBrrÆG&—fU÷f–FVõö–BDU…BÆG&—fU÷f–FVõ÷W&ÂDU…BÆG&—fU÷FW‡Eö–BDU…BÆG&—fU÷FW‡E÷W&ÂDU…BÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDR”äDU‚”bäõBU„•5E2–G…÷f—7VÅöÆW'Eö&6†—fW5ö7&VFVEöBôâf—7VÅöÆW'Eö&6†—fW2†7&VFVEöBDU42’"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2Æ–æ¶VF–åö6öææV7F–öç2†–BDU…B$”Ô%’´U’DTdTÅBwW'6öæÂrÆÖVÖ&W%ö–BDU…BäõBåTÄÂÆÖVÖ&W%öæÖRDU…BäõBåTÄÂDTdTÅBrrÆ66W75÷Fö¶VåöVæ7'—FVBDU…BäõBåTÄÂÆW‡—&W5öBD”ÔU5DÕE¢Æ6öææV7FVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’ÇWFFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2Æ–æ¶VF–å÷V&Æ–6F–öç2†–BDU…B$”Ô%’´U’Ç÷7E÷W&âDU…BäõBåTÄÂÇ÷7E÷W&ÂDU…BäõBåTÄÂÆ†5ö–ÖvR$ôôÄTâäõBåTÄÂDTdTÅBdÅ4RÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$ÅDU"D$ÄRÆ–æ¶VF–å÷V&Æ–6F–öç2DB4ôÅTÔâ”bäõBU„•5E2÷7E÷FW‡BDU…BäõBåTÄÂDTdTÅBrr"¢6öæâæW†V7WFR‚$ÅDU"D$ÄRÆ–æ¶VF–å÷V&Æ–6F–öç2DB4ôÅTÔâ”bäõBU„•5E2÷7E÷G—RDU…BäõBåTÄÂDTdTÅBrr"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2Æ–æ¶VF–åöæÇ—F–75ö–×÷'G2†–BDU…B$”Ô%’´U’Ç6÷W&6RDU…BäõBåTÄÂDTdTÅBw†Ç7‚rÆf–ÆVæÖRDU…BäõBåTÄÂDTdTÅBrrÇ&÷uö6÷VçB”åDTtU"äõBåTÄÂDTdTÅBÇW&–öE÷7F'BDDRÇW&–öEöVæBDDRÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2Æ–æ¶VF–åöæÇ—F–75÷&V6÷&G2†–BDU…B$”Ô%’´U’Æ–×÷'Eö–BDU…BäõBåTÄÂ$TdU$Tä4U2Æ–æ¶VF–åöæÇ—F–75ö–×÷'G2†–B’ôâDTÄUDR444DRÇ&V6÷&Eö¶–æBDU…BäõBåTÄÂDTdTÅBw÷7BrÇ&V6÷&EöFFRDDRÇ÷7E÷W&âDU…BÇ÷7E÷W&ÂDU…BÇ÷7E÷F—FÆRDU…BäõBåTÄÂDTdTÅBrrÇ÷7E÷G—RDU…BäõBåTÄÂDTdTÅBrrÆ–×&W76–öç2$”t”åBäõBåTÄÂDTdTÅBÆÖVÖ&W'5÷&V6†VB$”t”åBäõBåTÄÂDTdTÅBÆVævvVÖVçG5÷&W÷'FVB$”t”åBäõBåTÄÂDTdTÅBÇ&V7F–öç2$”t”åBäõBåTÄÂDTdTÅBÆ6öÖÖVçG2$”t”åBäõBåTÄÂDTdTÅBÇ&W÷7G2$”t”åBäõBåTÄÂDTdTÅBÇ6fW2$”t”åBäõBåTÄÂDTdTÅBÇ6VæG2$”t”åBäõBåTÄÂDTdTÅBÆÆ–æµö6Æ–6·2$”t”åBäõBåTÄÂDTdTÅBÆföÆÆ÷vW'5öv–æVB$”t”åBäõBåTÄÂDTdTÅBÇ&öf–ÆU÷f–Ww2$”t”åBäõBåTÄÂDTdTÅBÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDR”äDU‚”bäõBU„•5E2–G…öÆ–æ¶VF–åöæÇ—F–75ö–×÷'BôâÆ–æ¶VF–åöæÇ—F–75÷&V6÷&G2†–×÷'Eö–B’"¢6öæâæW†V7WFR‚$5$TDR”äDU‚”bäõBU„•5E2–G…öÆ–æ¶VF–åöæÇ—F–75öFFRôâÆ–æ¶VF–åöæÇ—F–75÷&V6÷&G2‡&V6÷&EöFFR’"¢6öæâæW†V7WFR‚$5$TDRD$ÄR”bäõBU„•5E2Æ–æ¶VF–å÷7W÷'F–æuöf–ÆW2†–BDU…B$”Ô%’´U’Ç÷7Eö–BDU…BäõBåTÄÂÇF—FÆRDU…BäõBåTÄÂÆf–ÆU÷G—RDU…BäõBåTÄÂÇ–ÆÆ"DU…BäõBåTÄÂDTdTÅBtu$2rÆ6öçFVçBDU…BäõBåTÄÂÆ7&VFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’ÇWFFVEöBD”ÔU5DÕE¢äõBåTÄÂDTdTÅBäõr‚’’"¢6öæâæW†V7WFR‚$5$TDRTä•TR”äDU‚”bäõBU„•5E2–G…öÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW5÷÷7BôâÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2‡÷7Eö–B’"¢6öæâæW†V7WFR‚$5$TDR”äDU‚”bäõBU„•5E2–G…öÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW5ö7&VFVBôâÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2†7&VFVEöBDU42’"¢6öæâæ6öÖÖ—B‚ ¦FVb&ö÷G7G&÷W6W"‚“ ¢–bæ÷BFF&6U÷W&Â‚“¢&WGW&à¢W6W&æÖRÒ÷2ævWFVçb‚$UD…ô$ôõE5E$õU4U$äÔR"Â""’ç7G&—‚¢77v÷&BÒ÷2ævWFVçb‚$UD…ô$ôõE5E$õ55tõ$B"Â""¢–bæ÷BW6W&æÖR÷"æ÷B77v÷&C¢&WGW&à¢v—F‚7–6÷ræ6öææV7B†FF&6U÷W&Â‚’Â&÷uöf7F÷'“ÖF–7E÷&÷r’26öæã ¢–b6öæâæW†V7WFR‚%4TÄT5B4õTåB‚¢’2F÷FÂe$ôÒW6W'2"’æfWF6†öæR‚•²'F÷FÂ%ÒÓÒ ¢6ÇBÂv‚Ò†6…÷77v÷&B‡77v÷&B¢6öæâæW†V7WFR‚$”å4U%B”åDòW6W'2†–BÇW6W&æÖRÇ77v÷&E÷6ÇBÇ77v÷&Eö†6‚Æ—5ö7F—fR’dÅTU2‚W2ÂW2ÂW2ÂW2ÅE%TR’"Â‡7G"‡WV–BçWV–CB‚’’ÂW6W&æÖRÂ6ÇBÂv‚’¢6öæâæ6öÖÖ—B‚ ¦FVbW6W%ö6÷VçB‚“ ¢–bæ÷BFF&6U÷W&Â‚“¢&WGW&â ¢G'“ ¢v—F‚7–6÷ræ6öææV7B†FF&6U÷W&Â‚’Â&÷uöf7F÷'“ÖF–7E÷&÷r’26öæã ¢&WGW&â6öæâæW†V7WFR‚%4TÄT5B4õTåB‚¢’2F÷FÂe$ôÒW6W'2t„U$R—5ö7F—fSÕE%TR"’æfWF6†öæR‚•²'F÷FÂ%Ğ¢W†6WBW†6WF–öã ¢&WGW&â  ¦FVbWF†VçF–6FUö&6–2††VFW"“ ¢–bæ÷B†VFW"÷"æ÷B†VFW"ç7F'G7v—F‚‚$&6–2"“¢&WGW&âfÇ6P¢G'“ ¢W6W&æÖRÂ77v÷&BÒ&6ScBæ#cFFV6öFR††VFW"ç7Æ—B‚""Â•³Ò’æFV6öFR‚’ç7Æ—B‚#¢"Â¢v—F‚7–6÷ræ6öææV7B†FF&6U÷W&Â‚’Â&÷uöf7F÷'“ÖF–7E÷&÷r’26öæã ¢RÒ6öæâæW†V7WFR‚%4TÄT5B¢e$ôÒW6W'2t„U$RW6W&æÖSÒW2"Â‡W6W&æÖRÂ’’æfWF6†öæR‚¢&WGW&â&ööÂ‡RæBU²&—5ö7F—fR%ÒæBfW&–g•÷77v÷&B‡77v÷&BÂU²'77v÷&E÷6ÇB%ÒÂU²'77v÷&Eö†6‚%Ò’¢W†6WBW†6WF–öã ¢&WGW&âfÇ6P ¤æÖ–FFÆWv&R‚&‡GG"¦7–æ2FVbWF‚‡&WVW7C¢&WVW7BÂ6ÆÅöæW‡B“ ¢–b&WVW7BçW&ÂçF‚–âUD…ôU„TÕEõD…3¢&WGW&âv—B6ÆÅöæW‡B‡&WVW7B¢–bæ÷BFF&6U÷W&Â‚“¢&WGW&â¥4ôå&W7öç6R‡²&FWF–Â#¢$DD$4UõU$Â—2æ÷B6öæf–wW&VB'ÒÂ7FGW5ö6öFSÓS2¢–bW6W%ö6÷VçB‚’ÓÒ¢&WGW&â¥4ôå&W7öç6R‡²&FWF–Â#¢$æò7F—fRW6W'2f÷VæBâ6WBUD…ô$ôõE5E$õU4U$äÔRæBUD…ô$ôõE5E$õ55tõ$B–â&–Çv’f&–&ÆW2ÂF†Vâ&VFWÆ÷’â'ÒÂ7FGW5ö6öFSÓS2¢–bæ÷BWF†VçF–6FUö&6–2‡&WVW7Bæ†VFW'2ævWB‚$WF†÷&—¦F–öâ"’“ ¢&WGW&â&W7öç6R‡7FGW5ö6öFSÓCÂ†VFW'3×²%uurÔWF†VçF–6FR#¢$&6–2&VÆÓÕÂ$uB7–&W"6öçFVçEÂ"Â6†'6WCÕÂ%UDbÓ…Â"'Ò¢&WGW&âv—B6ÆÅöæW‡B‡&WVW7B ¤æöåöWfVçB‚'7F'GW"¦FVb7F'GW‚“ ¢G'“¢–æ—EöF"‚“²&ö÷G7G&÷W6W"‚¢W†6WBW†6WF–öâ2S¢&–çB‚$FF&6R7F'GWv&æ–æs¢"ÂR ¦FVbW‡G&7Eö§6öâ‡FW‡B“ ¢6ÆVæVBÒ&Rç7V"‡"%æ§6öåÇ2§ÅæÇ2§ÅÇ2¦B"Â""ÂFW‡Bç7G&—‚’ÂfÆw3×&Rä—Ç&Rå2¢&WGW&â§6öâæÆöG2†6ÆVæVB ¤ævWB‚"ò"Â–æ6ÇVFUö–å÷66†VÖÔfÇ6R¦FVbvV%ö‚“¢&WGW&âf–ÆU&W7öç6R„”äDU…ôd”ÄRÂÖVF–÷G—SÒ'FW‡Bö‡FÖÂ" ¤ævWB‚"öÖö&–ÆRÖF÷væÆöBæ§2"Â–æ6ÇVFUö–å÷66†VÖÔfÇ6R¦FVbÖö&–ÆUö§2‚“ ¢&6RÒÔô$”ÄUô¥2ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’–bÔô$”ÄUô¥2æW†—7G2‚’VÇ6R" ¢6V&6‚ÒäUu5õ4T$4…ô¥2ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’–bäUu5õ4T$4…ô¥2æW†—7G2‚’VÇ6R" ¢f—7VÅöÆW'BÒd•5TÅôÄU%Eô¥2ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’–bd•5TÅôÄU%Eô¥2æW†—7G2‚’VÇ6R" ¢Æ–æ¶VF–âÒÄ”ä´TD”åô¥2ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’–bÄ”ä´TD”åô¥2æW†—7G2‚’VÇ6R" ¢&WGW&â&W7öç6R†6öçFVçCÖ&6R²%ÆåÆâ"²6V&6‚²%ÆåÆâ"²f—7VÅöÆW'B²%ÆåÆâ"²Æ–æ¶VF–âÂÖVF–÷G—SÒ&Æ–6F–öâö¦f67&—B"Â†VFW'3×²$66†RÔ6öçG&öÂ#¢&æò×7F÷&RÂÖ‚ÖvSÓ'Ò ¤ævWB‚"ö†VÇF‚"¦FVb†VÇF‚‚“ ¢&WGW&â°¢'7FGW2#¢&ö²"Â'fW'6–öâ#¢#ãS"ã"Â&÷Væ•ö6öæf–wW&VB#¦&ööÂ†÷2ævWFVçb‚$õTä•ô•ô´U’"’’À¢&vVÖ–æ•ö6öæf–wW&VB#¦&ööÂ†÷2ævWFVçb‚$tTÔ”ä•ô•ô´U’"’’À¢&–ÖvU÷&÷f–FW"#¢&vöövÆUöææõö&ææó%÷v—F…ö÷Væ•öfÆÆ&6²"–b÷2ævWFVçb‚$tTÔ”ä•ô•ô´U’"’æB÷2ævWFVçb‚$õTä•ô•ô´U’"’VÇ6R&vöövÆUöææõö&ææó""–b÷2ævWFVçb‚$tTÔ”ä•ô•ô´U’"’VÇ6R&÷Væ’"–b÷2ævWFVçb‚$õTä•ô•ô´U’"’VÇ6R'Væ6öæf–wW&VB"À¢&–ÖvUöÖöFVÂ#¦÷2ævWFVçb‚$tTÔ”ä•ô”ÔtUôÔôDTÂ"Â&vVÖ–æ’Ó2ãÖfÆ6‚Ö–ÖvR"’À¢&FF&6Uö6öææV7FVB#¦&ööÂ†FF&6U÷W&Â‚’’Â&7F—fU÷W6W'2#§W6W%ö6÷VçB‚’Â&vöövÆUöG&—fUö6öæf–wW&VB#¦ÆÂ†÷2ævWFVçb†¶W’’f÷"¶W’–â‚$tôôtÄUôE$•dUô4Ä”TåEô”B"Â$tôôtÄUôE$•dUô4Ä”TåEõ4T5$UB"Â$tôôtÄUôE$•dUõ$Te$U4…õDô´Tâ"’’Â&æWw5÷'6W"#¢'6÷W&6RÖFFR×fW&–f–VB×cB"À¢&æWw5ö'Gv÷&²#¢'GvòÖÆ–æRÖ7fRÖÆ–÷WB×c""Â&æWw5÷6V&6‚#¢&&÷fVB×6÷W&6W2×c"Â&æWw5÷6÷W&6W2#¦ÆVâ†ÆöEö7–&W%÷6÷W&6W2‚’’À¢&'—FW¥÷f–FVõö6öæf–wW&VB#¦&ööÂ†÷2ævWFVçb‚$%•DU¥ô•ô´U’"’’À¢&'—FW¥÷f–FVõöÖöFVÂ#¦÷2ævWFVçb‚$%•DU¥õd”DTõôÔôDTÂ"Â&WFöÖF–2"’À¢'f—7VÅöÆW'EöVF—F÷"#¢&f—†VBÖ'&æBÖ÷WG&ò×c#B"Â&'&æEö÷WG&ò#¥G'VRÂ&vVÖ–æ•÷GG5öÖöFVÂ#¦÷2ævWFVçb‚$tTÔ”ä•õEE5ôÔôDTÂ"Â&vVÖ–æ’Ó2ãÖfÆ6‚×GG2×&Wf–Wr"’À¢'&VÖ÷F–öå÷'VçF–ÖU÷&VG’#¦&ööÂ‡6‡WF–Âçv†–6‚‚&æöFR"’æB„$4UôD•"ò&æöFUöÖöGVÆW2"ò$&VÖ÷F–öâ"ò'&VæFW&W""’æW†—7G2‚’¢Ğ ¦FVböÆ–æ¶VF–åö6öæf–r‚“ ¢6Æ–VçEö–BÒ÷2ævWFVçb‚$Ä”ä´TD”åô4Ä”TåEô”B"Â""’ç7G&—‚¢6Æ–VçE÷6V7&WBÒ÷2ævWFVçb‚$Ä”ä´TD”åô4Ä”TåEõ4T5$UB"Â""’ç7G&—‚¢&VF—&V7E÷W&’Ò÷2ævWFVçb‚$Ä”ä´TD”åõ$TD•$T5EõU$’"Â""’ç7G&—‚¢–bæ÷BÆÂ‚†6Æ–VçEö–BÂ6Æ–VçE÷6V7&WBÂ&VF—&V7E÷W&’’“ ¢&—6R…EEW†6WF–öâƒS2Â-Š=‹m˜Ä”ä´TD”åô4Ä”TåEô”B˜„Ä”ä´TD”åô4Ä”TåEõ4T5$UB˜„Ä”ä´TD”åõ$TD•$T5EõU$’˜˜¢&–Çv’"¢&WGW&â6Æ–VçEö–BÂ6Æ–VçE÷6V7&WBÂ&VF—&V7E÷W& ¦FVböÆ–æ¶VF–åöfW&æWB‚“ ¢òÂ6V7&WBÂòÒöÆ–æ¶VF–åö6öæf–r‚¢¶W’Ò&6ScBçW&Ç6fUö#cFVæ6öFR††6†Æ–"ç6†#Sb‚‚&7–&W'VÇ6RÖÆ–æ¶VF–ã¢"²6V7&WB’æVæ6öFR‚’’æF–vW7B‚’¢&WGW&âfW&æWB†¶W’ ¦FVböÆ–æ¶VF–å÷Fö¶Vâ‚“ ¢v—F‚F%ö6öæâ‚’23 ¢&÷rÒ2æW†V7WFR‚%4TÄT5B¢e$ôÒÆ–æ¶VF–åö6öææV7F–öç2t„U$R–CÒwW'6öæÂr"’æfWF6†öæR‚¢–bæ÷B&÷s¢&—6R…EEW†6WF–öâƒC’Â-Šİ‹=Š}Š‚Æ–æ¶VD–â‹­˜­‹˜]Š­‹]˜B"¢–b&÷rævWB‚&W‡—&W5öB"’æB&÷u²&W‡—&W5öB%ÒÃÒFFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2“ ¢&—6R…EEW†6WF–öâƒCÂ-Š}˜mŠ­˜}Š¢‹]˜MŠ}Šİ˜­Š’‹Š‹rÆ–æ¶VD–ââŠ=‹ŠòŠ}˜MŠ}Š­‹]Š}˜BŠŠ}˜MŠİ‹=Š}Š‚"¢G'“¢&WGW&âöÆ–æ¶VF–åöfW&æWB‚’æFV7'—B‡&÷u²&66W75÷Fö¶VåöVæ7'—FVB%ÒæVæ6öFR‚’’æFV6öFR‚’Â&÷p¢W†6WB–çfÆ–EFö¶Vã¢&—6R…EEW†6WF–öâƒSÂ-Š­‹‹‹˜-‹Š}ŠŠ’Š}Š­‹]Š}˜BÆ–æ¶VD–ââŠ=‹Šò‹Š‹rŠ}˜MŠİ‹=Š}Š‚" ¤ævWB‚"öWF‚öÆ–æ¶VF–â÷7F'B"¦FVbÆ–æ¶VF–å÷7F'B‚“ ¢6Æ–VçEö–BÂ6V7&WBÂ&VF—&V7E÷W&’ÒöÆ–æ¶VF–åö6öæf–r‚¢—77VVBÒ7G"†–çB‡F–ÖRçF–ÖR‚’’¢æöæ6RÒ6V7&WG2çFö¶Vå÷W&Ç6fRƒ‚¢–ÆöBÒ—77VVB²"â"²æöæ6P¢6–væGW&RÒ†Ö2ææWr‡6V7&WBæVæ6öFR‚’Â–ÆöBæVæ6öFR‚’Â†6†Æ–"ç6†#Sb’æ†W†F–vW7B‚¢7FFRÒ&6ScBçW&Ç6fUö#cFVæ6öFR‚‡–ÆöB²"â"²6–væGW&R’æVæ6öFR‚’’æFV6öFR‚’ç'7G&—‚#Ò"¢66÷W2Ò²&÷Væ–B"Â'&öf–ÆR"Â'uöÖVÖ&W%÷6ö6–Â%Ğ¢–b÷2ævWFVçb‚$Ä”ä´TD”åôäÅ•D”55ô$õdTB"Â""’æÆ÷vW"‚’–â‚#"Â'G'VR"Â'–W2"“¢66÷W2æVæB‚'%öÖVÖ&W%÷÷7DæÇ—F–72"¢VW'’ÒW&ÆVæ6öFR‡²'&W7öç6U÷G—R#¢&6öFR"Â&6Æ–VçEö–B#¦6Æ–VçEö–BÂ'&VF—&V7E÷W&’#§&VF—&V7E÷W&’Â'7FFR#§7FFRÂ'66÷R#¢""æ¦ö–â‡66÷W2—Ò¢&WGW&â&VF—&V7E&W7öç6R‚&‡GG3¢ò÷wwræÆ–æ¶VF–âæ6öÒööWF‚÷c"öWF†÷&—¦F–öãò"²VW'’ ¤ævWB‚"öWF‚öÆ–æ¶VF–âö6ÆÆ&6²"¦FVbÆ–æ¶VF–åö6ÆÆ&6²†6öFS¢7G"Ò""Â7FFS¢7G"Ò""ÂW'&÷#¢7G"Ò""“ ¢–bW'&÷#¢&WGW&â&VF—&V7E&W7öç6R‚"ò6Æ–æ¶VF–ãöÆ–æ¶VF–ãÖFVæ–VB"¢6Æ–VçEö–BÂ6V7&WBÂ&VF—&V7E÷W&’ÒöÆ–æ¶VF–åö6öæf–r‚¢G'“ ¢FV6öFVBÒ&6ScBçW&Ç6fUö#cFFV6öFR‡7FFR²#Ò"¢‚ÖÆVâ‡7FFR’RB’’æFV6öFR‚¢—77VVBÂæöæ6RÂ6–væGW&RÒFV6öFVBç7Æ—B‚"â"Â"¢W‡V7FVBÒ†Ö2ææWr‡6V7&WBæVæ6öFR‚’Âb'¶—77VVGÒç¶æöæ6WÒ"æVæ6öFR‚’Â†6†Æ–"ç6†#Sb’æ†W†F–vW7B‚¢–bæ÷B†Ö2æ6ö×&UöF–vW7B‡6–væGW&RÂW‡V7FVB’÷"'2†–çB‡F–ÖRçF–ÖR‚’’Ò–çB†—77VVB’’â“¢&—6RfÇVTW'&÷"‚¢W†6WBW†6WF–öã¢&—6R…EEW†6WF–öâƒCÂ-ŠİŠ}˜MŠ’ôWF‚‹­˜­‹‹]Š}˜MŠİŠ’Š=˜‚˜]˜mŠ­˜}˜­Š’"¢–bæ÷B6öFS¢&—6R…EEW†6WF–öâƒCÂ-˜M˜R˜­˜ı‹ŠÍ‹’Æ–æ¶VD–â‹˜]‹"Š}˜MŠ­˜˜˜­‹b"¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÓC’26Æ–VçC ¢Fö¶Vå÷&W7öç6RÒ6Æ–VçBç÷7B‚&‡GG3¢ò÷wwræÆ–æ¶VF–âæ6öÒööWF‚÷c"ö66W75Fö¶Vâ"ÂFF×²&w&çE÷G—R#¢&WF†÷&—¦F–öåö6öFR"Â&6öFR#¦6öFRÂ'&VF—&V7E÷W&’#§&VF—&V7E÷W&’Â&6Æ–VçEö–B#¦6Æ–VçEö–BÂ&6Æ–VçE÷6V7&WB#§6V7&WGÒ¢–bFö¶Vå÷&W7öç6Rç7FGW5ö6öFRãÒC¢&—6R…EEW†6WF–öâƒS"Âb-Š­‹‹‹Š}˜MŠİ‹]˜˜B‹˜M˜’‹˜]‹"Æ–æ¶VD–ã¢·Fö¶Vå÷&W7öç6RçFW‡E³£S×Ò"¢Fö¶VåöFFÒFö¶Vå÷&W7öç6Ræ§6öâ‚“²Fö¶VâÒFö¶VåöFFævWB‚&66W75÷Fö¶Vâ"Â""¢&öf–ÆU÷&W7öç6RÒ6Æ–VçBævWB‚&‡GG3¢òö’æÆ–æ¶VF–âæ6öÒ÷c"÷W6W&–æfò"Â†VFW'3×²$WF†÷&—¦F–öâ#¦b$&V&W"·Fö¶VçÒ'Ò¢–b&öf–ÆU÷&W7öç6Rç7FGW5ö6öFRãÒC¢&—6R…EEW†6WF–öâƒS"Âb-Š­‹‹‹˜-‹Š}ŠŠ’Šİ‹=Š}Š‚Æ–æ¶VD–ã¢·&öf–ÆU÷&W7öç6RçFW‡E³£S×Ò"¢&öf–ÆRÒ&öf–ÆU÷&W7öç6Ræ§6öâ‚¢ÖVÖ&W%ö–BÒ7G"‡&öf–ÆRævWB‚'7V""Â""’’ç7G&—‚¢–bæ÷BFö¶Vâ÷"æ÷BÖVÖ&W%ö–C¢&—6R…EEW†6WF–öâƒS"Â-˜M˜R˜­˜ı‹ŠÍ‹’Æ–æ¶VD–âŠ˜­Š}˜mŠ}Š¢Š}˜MŠİ‹=Š}Š‚˜=Š}˜]˜MŠ’"¢W‡—&W5öBÒFFWF–ÖRæg&ö×F–ÖW7F×‡F–ÖRçF–ÖR‚’²–çB‡Fö¶VåöFFævWB‚&W‡—&W5ö–â"ÂSƒC’’ÂF–ÖW¦öæRçWF2¢Væ7'—FVBÒöÆ–æ¶VF–åöfW&æWB‚’æVæ7'—B‡Fö¶VâæVæ6öFR‚’’æFV6öFR‚¢æÖRÒ7G"‡&öf–ÆRævWB‚&æÖR"’÷"-Šİ‹=Š}Š‚Æ–æ¶VD–â"•³£3Ğ¢v—F‚F%ö6öæâ‚’23 ¢2æW†V7WFR‚$”å4U%B”åDòÆ–æ¶VF–åö6öææV7F–öç2†–BÆÖVÖ&W%ö–BÆÖVÖ&W%öæÖRÆ66W75÷Fö¶VåöVæ7'—FVBÆW‡—&W5öB’dÅTU2‚wW'6öæÂrÂW2ÂW2ÂW2ÂW2’ôâ4ôädÄ”5B†–B’DòUDDR4UBÖVÖ&W%ö–CÔU„4ÅTDTBæÖVÖ&W%ö–BÆÖVÖ&W%öæÖSÔU„4ÅTDTBæÖVÖ&W%öæÖRÆ66W75÷Fö¶VåöVæ7'—FVCÔU„4ÅTDTBæ66W75÷Fö¶VåöVæ7'—FVBÆW‡—&W5öCÔU„4ÅTDTBæW‡—&W5öBÇWFFVEöCÔäõr‚’"Â†ÖVÖ&W%ö–BÆæÖRÆVæ7'—FVBÆW‡—&W5öB’“²2æ6öÖÖ—B‚¢&WGW&â&VF—&V7E&W7öç6R‚"ò6Æ–æ¶VF–ãöÆ–æ¶VF–ãÖ6öææV7FVB" ¤ævWB‚"ö’öÆ–æ¶VF–â÷7FGW2"¦FVbÆ–æ¶VF–å÷7FGW2‚“ ¢6öæf–wW&VBÒÆÂ†÷2ævWFVçb†²’f÷"²–â‚$Ä”ä´TD”åô4Ä”TåEô”B"Â$Ä”ä´TD”åô4Ä”TåEõ4T5$UB"Â$Ä”ä´TD”åõ$TD•$T5EõU$’"’¢–bæ÷B6öæf–wW&VC¢&WGW&â²&6öæf–wW&VB#¤fÇ6RÂ&6öææV7FVB#¤fÇ6WĞ¢v—F‚F%ö6öæâ‚’23¢&÷rÒ2æW†V7WFR‚%4TÄT5BÖVÖ&W%öæÖRÆW‡—&W5öBÆ6öææV7FVEöBe$ôÒÆ–æ¶VF–åö6öææV7F–öç2t„U$R–CÒwW'6öæÂr"’æfWF6†öæR‚¢6öææV7FVBÒ&ööÂ‡&÷ræB†æ÷B&÷u²&W‡—&W5öB%Ò÷"&÷u²&W‡—&W5öB%ÒâFFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’’¢&WGW&â²&6öæf–wW&VB#¥G'VRÂ&6öææV7FVB#¦6öææV7FVBÂ&ÖVÖ&W%öæÖR#§&÷u²&ÖVÖ&W%öæÖR%Ò–b&÷rVÇ6R""Â&W‡—&W5öB#§&÷u²&W‡—&W5öB%Ò–b&÷rVÇ6RæöæRÂ&æÇ—F–75ö&÷fVB#¦÷2ævWFVçb‚$Ä”ä´TD”åôäÅ•D”55ô$õdTB"Â""’æÆ÷vW"‚’–â‚#"Â'G'VR"Â'–W2"—Ğ ¤ç÷7B‚"ö’öÆ–æ¶VF–âöF—66öææV7B"¦FVbÆ–æ¶VF–åöF—66öææV7B‚“ ¢v—F‚F%ö6öæâ‚’23¢2æW†V7WFR‚$DTÄUDRe$ôÒÆ–æ¶VF–åö6öææV7F–öç2t„U$R–CÒwW'6öæÂr"“²2æ6öÖÖ—B‚¢&WGW&â²&F—66öææV7FVB#¥G'VWĞ ¦FVböÆ–æ¶VF–å÷'FÅ÷FW‡B‡FW‡C¢7G"“ ¢æ÷&ÖÆ—¦VBÒ7G"‡FW‡B÷"""’ç&WÆ6R‚%Ç%Æâ"Â%Æâ"’ç&WÆ6R‚%Ç""Â%Æâ"¢–bæ÷B&Rç6V&6‚‡"%µÇScÕÇSffeÇSsSÕÇSsveÇS†ÕÇS†feÒ"Âæ÷&ÖÆ—¦VB“ ¢&WGW&âæ÷&ÖÆ—¦V@¢&WGW&â%Æâ"æ¦ö–â€¢Æ–æR–bæ÷BÆ–æRç7G&—‚’÷"Æ–æRç7F'G7v—F‚‚%ÇS#b"’VÇ6R%ÇS#b"²Æ–æP¢f÷"Æ–æR–âæ÷&ÖÆ—¦VBç7Æ—B‚%Æâ"¢ ¤ç÷7B‚"ö’öÆ–æ¶VF–â÷V&Æ—6‚"¦FVbÆ–æ¶VF–å÷V&Æ—6‚‡&W¢Æ–æ¶VD–åV&Æ—6…&WVW7B“ ¢÷7E÷FW‡BÒöÆ–æ¶VF–å÷'FÅ÷FW‡B‡&WçFW‡B¢–bÆVâ‡÷7E÷FW‡B’â3 ¢&—6R…EEW†6WF–öâƒCÂb-Š}˜M˜m‹R˜­Š­ŠÍŠ}˜‹"ŠİŠòÆ–æ¶VD–âŠ˜]˜-ŠıŠ}‹¶ÆVâ‡÷7E÷FW‡B’Ò3ÒŠİ‹˜˜½ŠrŠ‹Šò‹mŠ‹rŠ}˜MŠ}Š­ŠÍŠ}˜râŠ}ŠíŠ­‹]‹˜r˜-Š˜BŠ}˜M˜m‹M‹â"¢Fö¶VâÂ6öææV7F–öâÒöÆ–æ¶VF–å÷Fö¶Vâ‚¢WF†÷"Ò'W&ã¦Æ“§W'6öã¢"²6öææV7F–öå²&ÖVÖ&W%ö–B%Ğ¢†VFW'2Ò²$WF†÷&—¦F–öâ#¦b$&V&W"·Fö¶VçÒ"Â$Æ–æ¶VF–âÕfW'6–öâ#¦÷2ævWFVçb‚$Ä”ä´TD”åô•õdU%4”ôâ"Â###c‚"’Â%‚Õ&W7FÆ’Õ&÷Fö6öÂÕfW'6–öâ#¢#"ãã"Â$6öçFVçBÕG—R#¢&Æ–6F–öâö§6öâ'Ğ¢6öçFVçBÒæöæP¢–ÖvW2ÒÆ—7B‡&Wæ–ÖvW2¢–bæ÷B–ÖvW2æB&Wæ–ÖvUö#cC ¢–ÖvW2æVæB„Æ–æ¶VD–ä–ÖvR†–ÖvUö#cC×&Wæ–ÖvUö#cBÂ–ÖvUöÖ–ÖU÷G—S×&Wæ–ÖvUöÖ–ÖU÷G—R’¢WÆöFVEö–ÖvW2ÒµĞ¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÓ#’26Æ–VçC ¢f÷"–æFW‚Â–ÖvR–âVçVÖW&FR†–ÖvW2Â“ ¢G'“¢–ÖvUö'—FW2Ò&6ScBæ#cFFV6öFR†–ÖvRæ–ÖvUö#cBÂfÆ–FFSÕG'VR¢W†6WBW†6WF–öã¢&—6R…EEW†6WF–öâƒCÂb-Š˜­Š}˜mŠ}Š¢Š}˜M‹]˜‹Š’¶–æFW‡Ò‹­˜­‹‹]Š}˜MŠİŠ’"¢–bÆVâ†–ÖvUö'—FW2’â¢#B¢#C¢&—6R…EEW†6WF–öâƒC2Âb-ŠİŠÍ˜RŠ}˜M‹]˜‹Š’¶–æFW‡Ò˜­Š­ŠÍŠ}˜‹"Ô""¢–æ—BÒ6Æ–VçBç÷7B‚&‡GG3¢òö’æÆ–æ¶VF–âæ6öÒ÷&W7Bö–ÖvW3ö7F–öãÖ–æ—F–Æ—¦UWÆöB"Â†VFW'3Ö†VFW'2Â§6öã×²&–æ—F–Æ—¦UWÆöE&WVW7B#§²&÷væW"#¦WF†÷'×Ò¢–b–æ—Bç7FGW5ö6öFRãÒC¢&—6R…EEW†6WF–öâ†–æ—Bç7FGW5ö6öFRÂb-Š­‹‹‹Š­˜}˜­ŠmŠ’‹]˜‹Š’Æ–æ¶VD–â‹˜-˜R¶–æFW‡Ó¢¶–æ—BçFW‡E³£s×Ò"¢fÇVRÒ–æ—Bæ§6öâ‚’ævWB‚'fÇVR"Â·Ò“²WÆöE÷W&ÂÒfÇVRævWB‚'WÆöEW&Â"“²–ÖvU÷W&âÒfÇVRævWB‚&–ÖvR"¢–bæ÷BWÆöE÷W&Â÷"æ÷B–ÖvU÷W&ã¢&—6R…EEW†6WF–öâƒS"Âb-˜M˜R˜­˜ı‹ŠÍ‹’Æ–æ¶VD–â‹Š}Š‹r‹˜‹’Š}˜M‹]˜‹Š’¶–æFW‡Ò"¢WÆöBÒ6Æ–VçBçWB‡WÆöE÷W&ÂÂ6öçFVçCÖ–ÖvUö'—FW2Â†VFW'3×²$6öçFVçBÕG—R#¦–ÖvRæ–ÖvUöÖ–ÖU÷G—WÒ¢–bWÆöBç7FGW5ö6öFRãÒC¢&—6R…EEW†6WF–öâ‡WÆöBç7FGW5ö6öFRÂb-Š­‹‹‹‹˜‹’‹]˜‹Š’Æ–æ¶VD–â‹˜-˜R¶–æFW‡Ó¢·WÆöBçFW‡E³£S×Ò"¢—FVÒÒ²&–B#¦–ÖvU÷W&çĞ¢–b–ÖvRæÇE÷FW‡C¢—FVÕ²&ÇEFW‡B%ÒÒ–ÖvRæÇE÷FW‡@¢WÆöFVEö–ÖvW2æVæB†—FVÒ¢–bÆVâ‡WÆöFVEö–ÖvW2’ÓÒ ¢6öçFVçBÒ²&ÖVF–#§²'F—FÆR#¢-˜mŠ‹b‹=˜­Š‹Š}˜m˜¢Â5”$U"TÅ4R"Â&–B#§WÆöFVEö–ÖvW5³Õ²&–B%××Ğ¢VÆ–bÆVâ‡WÆöFVEö–ÖvW2’â ¢6öçFVçBÒ²&×VÇF”–ÖvR#§²&–ÖvW2#§WÆöFVEö–ÖvW7×Ğ¢&öG’Ò²&WF†÷"#¦WF†÷"Â&6öÖÖVçF'’#§÷7E÷FW‡BÂ'f—6–&–Æ—G’#¢%T$Ä”2"Â&F—7G&–'WF–öâ#§²&fVVDF—7G&–'WF–öâ#¢$Ô”åôdTTB"Â'F&vWDVçF—F–W2#¥µÒÂ'F†—&E'G”F—7G&–'WF–öä6†ææVÇ2#¥µ×ÒÂ&Æ–fV7–6ÆU7FFR#¢%T$Ä•4„TB"Â&—5&W6†&TF—6&ÆVD'”WF†÷"#¤fÇ6WĞ¢–b6öçFVçC¢&öG•²&6öçFVçB%ÒÒ6öçFVç@¢&W7öç6RÒ6Æ–VçBç÷7B‚&‡GG3¢òö’æÆ–æ¶VF–âæ6öÒ÷&W7B÷÷7G2"Â†VFW'3Ö†VFW'2Â§6öãÖ&öG’¢–b&W7öç6Rç7FGW5ö6öFRãÒC¢&—6R…EEW†6WF–öâ‡&W7öç6Rç7FGW5ö6öFRÂb-˜‹M˜BŠ}˜M˜m‹M‹‹˜M˜’Æ–æ¶VD–ã¢·&W7öç6RçFW‡E³£“×Ò"¢÷7E÷W&âÒ&W7öç6Ræ†VFW'2ævWB‚'‚×&W7FÆ’Ö–B"Â""¢÷7E÷W&ÂÒ&‡GG3¢ò÷wwræÆ–æ¶VF–âæ6öÒöfVVB÷WFFRò"²÷7E÷W&â²"ò"–b÷7E÷W&âVÇ6R&‡GG3¢ò÷wwræÆ–æ¶VF–âæ6öÒöfVVBò ¢v—F‚F%ö6öæâ‚’23 ¢V&Æ—6†VE÷G—SÒ$6&÷W6VÂ"–bÆVâ‡WÆöFVEö–ÖvW2“ãVÇ6R$–ÖvR"–bWÆöFVEö–ÖvW2VÇ6R%FW‡B ¢2æW†V7WFR‚$”å4U%B”åDòÆ–æ¶VF–å÷V&Æ–6F–öç2†–BÇ÷7E÷W&âÇ÷7E÷W&ÂÆ†5ö–ÖvRÇ÷7E÷FW‡BÇ÷7E÷G—R’dÅTU2‚W2ÂW2ÂW2ÂW2ÂW2ÂW2’"Â‡7G"‡WV–BçWV–CB‚’’Ç÷7E÷W&âÇ÷7E÷W&ÂÆ&ööÂ†6öçFVçB’Ç&WçFW‡BÇV&Æ—6†VE÷G—R’“²2æ6öÖÖ—B‚¢&WGW&â²'V&Æ—6†VB#¥G'VRÂ'÷7E÷W&â#§÷7E÷W&âÂ'÷7E÷W&Â#§÷7E÷W&ÂÂ&–ÖvUö6÷VçB#¦ÆVâ‡WÆöFVEö–ÖvW2—Ğ ¦FVb÷7W÷'F–æuöf–ÆUöfÆÆ&6²‡&W¢7W÷'F–ætf–ÆTvVæW&FU&WVW7B“ ¢&7F–6ÂÒ¶Æ–æRç7G&—‚"Ş(
+%ÇB"’f÷"Æ–æR–â&Wç÷7E÷FW‡Bç7Æ—FÆ–æW2‚’–bÆ–æRç7G&—‚’ç7F'G7v—F‚‚‚.(
+""Â"Ò"’•Ğ¢&7F–6ÂÒ&7F–6Å³£uÒ÷"²-ŠİŠı™Šò˜]Š}˜M˜=˜½Šr˜Š}‹mŠİ˜½Šr˜M˜=˜BŠ]ŠÍ‹Š}Š˜˜]˜‹Šı˜½Šr˜]‹=Š­˜}Šı˜˜½Šr˜M˜MŠ­˜m˜˜­‹â"Â-Š}‹Š‹rŠ}˜M˜-‹Š}‹ŠŠ}˜M˜]ŠíŠ}‹}‹˜Š}˜MŠ=Š½‹Š}˜M˜]Š­˜˜-‹’‹˜M˜’Š}˜M‹˜]˜Bâ"Â-˜Š½™˜"Š}˜MŠ=Šı˜MŠ’˜Š}˜M˜mŠ­Š}ŠmŠÍˆÂŠ½˜R‹Š}ŠÍ‹’Š}˜MŠ­˜-Šı˜RŠ‹]˜‹Š’Šı˜‹˜­Š’â%Ğ¢&WGW&â%Æâ"æ¦ö–â…¶b"2·&Wç÷7E÷F—FÆWÒ"Â"22Š}˜M˜}Šı˜˜]˜bŠ}˜M˜]˜M˜"Â-˜­Šİ˜™˜B˜}‹ŠrŠ}˜M˜]˜M˜˜˜=‹Š’Š}˜M˜]˜m‹M˜‹Š]˜M˜’Ší‹}˜Š}Š¢‹˜]˜M˜­Š’˜-Š}Š˜MŠ’˜M˜M˜]‹Š}ŠÍ‹Š’˜Š}˜MŠ­‹}Š˜­˜"ŠıŠ}Ší˜BŠ}˜M˜]ŠM‹=‹=Š’â"Â"22˜M˜]˜bŠ=˜ı‹Šò˜}‹ŠrŠ}˜M˜]˜M˜‰ò"Â-˜M˜-˜­Š}ŠıŠ}Š¢Š}˜MŠ=˜]˜bŠ}˜M‹=˜­Š‹Š}˜m˜¢˜Š}˜MŠİ˜˜=˜]Š’˜Š]ŠıŠ}‹Š’Š}˜M˜]ŠíŠ}‹}‹˜˜]Š}˜M˜=˜¢Š}˜MŠíŠı˜]Š}Š¢˜Š}˜M‹˜]˜M˜­Š}Š¢â"Â"22Ší‹}˜Š}Š¢Š}˜MŠ­‹}Š˜­˜""Â¥¶b"Ò¶—FV×Ò"f÷"—FVÒ–â&7F–6ÅÒÂ"22Š=‹=Šm˜MŠ’Š}˜M˜]‹Š}ŠÍ‹Š’"Â"Ò˜}˜B˜m‹}Š}˜"Š}˜M˜]˜‹m˜‹’˜Š}˜M˜-‹Š}‹Š}˜M˜]‹}˜M˜Š‚˜]ŠİŠıŠıŠ}˜bŠ˜‹m˜Šİ‰ò"Â"Ò˜}˜B˜­˜ŠÍŠò˜]Š}˜M˜2Š­˜m˜˜­‹˜¢˜˜]ŠM‹M‹˜M˜-˜­Š}‹2Š}˜MŠ­˜-Šı˜]‰ò"Â"Ò˜}˜BŠ­˜RŠ­˜Š½˜­˜"Š}˜M˜]ŠíŠ}‹}‹˜Š}˜MŠ}‹Š­˜]Š}Šò˜Š}˜MŠ}‹=Š­Š½˜mŠ}ŠŠ}Š­‰ò"Â"22Š}˜M˜]Ší‹ŠÂŠ}˜M˜]‹}˜M˜Š‚"Â-˜-‹Š}‹˜]˜Š½˜-ˆÂ˜Ší‹}Š’Š­˜m˜˜­‹˜]ŠİŠıŠıŠ’Š}˜M˜]‹=ŠM˜˜M˜­Š}Š¢˜Š}˜M˜]˜Š}‹˜­ŠıˆÂ˜Š-˜M˜­Š’˜]Š­Š}Š‹Š’˜-Š}Š˜MŠ’˜M˜M˜-˜­Š}‹2â"Â"22Š­˜mŠ˜­˜r˜]˜}˜m˜¢"Â-˜}‹ŠrŠ}˜M˜]˜M˜Š]‹‹MŠ}Šı˜¢˜˜­ŠÍŠ‚Š­˜=˜­˜­˜˜r˜]‹’‹=˜­Š}‹=Š}Š¢Š}˜M˜]ŠM‹=‹=Š’˜˜]Š­‹}˜MŠŠ}Š­˜}ŠrŠ}˜MŠ­˜m‹˜­˜]˜­Š’˜‹M˜}˜­Š’Š}˜M˜]ŠíŠ}‹}‹Š}˜M˜]‹Š­˜]ŠıŠ’â%Ò ¦FVbövVæW&FU÷7W÷'F–æuöf–ÆUö6öçFVçB‡&W¢7W÷'F–ætf–ÆTvVæW&FU&WVW7B“ ¢–bæ÷B÷2ævWFVçb‚$õTä•ô•ô´U’"“¢&WGW&â÷7W÷'F–æuöf–ÆUöfÆÆ&6²‡&W¢&ö×BÒbrr}Š=˜mŠ¢˜]‹=Š­‹MŠ}‹Š=˜]˜b˜]‹˜M˜˜]Š}Š¢˜Šİ˜˜=˜]Š’˜]ŠM‹=‹=˜­Š’âŠ=˜m‹MŠb˜]˜M˜˜½ŠrŠıŠ}‹˜]˜½Šr‹‹Š˜­˜½ŠrŠ}ŠİŠ­‹Š}˜˜­˜½Šr˜]˜b˜m˜‹“¢·&Wæf–ÆU÷G—WÒà­Š}˜M˜]˜‹m˜‹“¢·&Wç÷7E÷F—FÆWĞ­Š}˜M˜]ŠÍŠ}˜C¢·&Wç–ÆÆ'Ğ­˜m‹R˜]˜m‹M˜‹Æ–æ¶VD–âŠ}˜M˜]‹]Šı‹ §·&Wç÷7E÷FW‡GĞ ­Š}‹=Š­ŠíŠı˜R˜˜-‹rŠ}˜MŠ=˜˜=Š}‹Š}˜M˜]Šı‹˜˜]Š’˜˜¢Š}˜M˜]˜m‹M˜‹ˆÂ˜˜MŠrŠ­ŠíŠ­‹‹’Š=‹˜-Š}˜]˜½ŠrŠ=˜‚˜-˜Š}˜m˜­˜bŠ=˜‚˜]‹Š}˜­˜­‹Š=˜‚˜]‹Š}ŠÍ‹’âŠİ˜™˜BŠ}˜M˜]˜m‹M˜‹Š]˜M˜’˜-˜­˜]Š’‹˜]˜M˜­Š’Š=‹˜]˜"Šı˜˜bŠ­˜=‹Š}‹˜rŠİ‹˜˜­˜½Šrà­Š=‹ŠòÖ&¶F÷vâ‹‹Š˜­˜½Šr˜˜-‹}ˆÂ˜]˜bsŠ]˜M˜’#˜=˜M˜]ŠˆÂ˜­ŠŠıŠ2Š‹˜m˜Š}˜b2˜Š}ŠİŠıˆÂŠ½˜RŠ=˜-‹=Š}˜R22˜-‹]˜­‹Š’˜˜Š}‹mŠİŠ’âŠ=‹m˜Šİ‹=Š‚˜]˜MŠ}Š˜]Š’Š}˜M˜m˜‹“¢Š}˜M˜}Šı˜ˆÂŠ}˜MŠÍ˜]˜}˜‹ˆÂ‹}‹˜­˜-Š’Š}˜MŠ}‹=Š­ŠíŠıŠ}˜]ˆÂŠí‹}˜Š}Š¢‹˜]˜M˜­ŠˆÂ˜-Š}Šm˜]Š’Š­Šİ˜-˜-ˆÂŠ=‹=Šm˜MŠ’˜-‹Š}‹ˆÂ˜]Ší‹ŠÍŠ}Š¢˜]Š­˜˜-‹ŠˆÂ˜Š­˜mŠ˜­˜r˜]˜}˜m˜¢âŠ}‹=Š­ŠíŠı˜R˜-˜Š}Šm˜RŠ­ŠŠıŠ2Š˜Ò‹˜mŠòŠ}˜MŠİŠ}ŠÍŠ’â˜MŠrŠ­‹m˜˜}Š}‹MŠ­Š}˜-Š}Š¢Š=˜‚Šı‹˜Š’Š­‹=˜˜­˜-˜­Š’Š=˜‚˜]‹˜M˜˜]Š}Š¢Š­˜Š}‹]˜Bârrp¢&W7VÇBÒ÷Vä’†•ö¶W“Ö÷2ævWFVçb‚$õTä•ô•ô´U’"’’ç&W7öç6W2æ7&VFR†ÖöFVÃÖ÷2ævWFVçb‚$õTä•ôÔôDTÂ"Â&wBÓR"’Â–çWC×&ö×BÂ7F÷&SÔfÇ6R¢6öçFVçBÒ&Rç7V"‡"%æƒó¦Ö&¶F÷vâ“õÇ2§ÅÇ2¦B"Â""Â&W7VÇBæ÷WGWE÷FW‡Bç7G&—‚’ÂfÆw3×&Rä—Ç&Rå2¢–bÆVâ†6öçFVçB’Â#¢&—6R…EEW†6WF–öâƒS"Â-˜M˜R˜­˜ı‹ŠÍ‹’Š}˜M˜m˜]˜‹ŠÂ˜]ŠİŠ­˜˜’˜=Š}˜˜­˜½Šr˜M˜M˜]˜M˜Š}˜MŠıŠ}‹˜R"¢&WGW&â6öçFVç@ ¤ævWB‚"ö’öÆ–æ¶VF–â÷7W÷'F–ærÖf–ÆW2"¦FVbÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2‚“ ¢v—F‚F%ö6öæâ‚’23¢&WGW&â2æW†V7WFR‚%4TÄT5B–BÇ÷7Eö–BÇF—FÆRÆf–ÆU÷G—RÇ–ÆÆ"Æ6öçFVçBÆ7&VFVEöBÇWFFVEöBe$ôÒÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2õ$DU"%’7&VFVEöBDU42Ä”Ô•B"’æfWF6†ÆÂ‚ ¤ç÷7B‚"ö’öÆ–æ¶VF–â÷7W÷'F–ærÖf–ÆW2"¦FVbÆ–æ¶VF–å÷7W÷'F–æuöf–ÆUövVæW&FR‡&W¢7W÷'F–ætf–ÆTvVæW&FU&WVW7B“ ¢6öçFVçBÒövVæW&FU÷7W÷'F–æuöf–ÆUö6öçFVçB‡&W¢F—FÆRÒæW‡B‚†Æ–æRæÇ7G&—‚"2"’ç7G&—‚’f÷"Æ–æR–â6öçFVçBç7Æ—FÆ–æW2‚’–bÆ–æRç7F'G7v—F‚‚"2"’’Â&Wç÷7E÷F—FÆR¢f–ÆUö–BÒ7G"‡WV–BçWV–CB‚’¢v—F‚F%ö6öæâ‚’23 ¢W†—7F–ærÒ2æW†V7WFR‚%4TÄT5B–Be$ôÒÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2t„U$R÷7Eö–CÒW2"Â‡&Wç÷7Eö–BÂ’’æfWF6†öæR‚¢–bW†—7F–æs ¢f–ÆUö–BÒW†—7F–æu²&–B%Ğ¢2æW†V7WFR‚%UDDRÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW24UBF—FÆSÒW2Æf–ÆU÷G—SÒW2Ç–ÆÆ#ÒW2Æ6öçFVçCÒW2ÇWFFVEöCÔäõr‚’t„U$R–CÒW2"Â‡F—FÆRÇ&Wæf–ÆU÷G—RÇ&Wç–ÆÆ"Æ6öçFVçBÆf–ÆUö–B’¢VÇ6S¢2æW†V7WFR‚$”å4U%B”åDòÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2†–BÇ÷7Eö–BÇF—FÆRÆf–ÆU÷G—RÇ–ÆÆ"Æ6öçFVçB’dÅTU2‚W2ÂW2ÂW2ÂW2ÂW2ÂW2’"Â†f–ÆUö–BÇ&Wç÷7Eö–BÇF—FÆRÇ&Wæf–ÆU÷G—RÇ&Wç–ÆÆ"Æ6öçFVçB’¢2æ6öÖÖ—B‚¢&WGW&â²&–B#¦f–ÆUö–BÂ'÷7Eö–B#§&Wç÷7Eö–BÂ'F—FÆR#§F—FÆRÂ&f–ÆU÷G—R#§&Wæf–ÆU÷G—RÂ'–ÆÆ"#§&Wç–ÆÆ"Â&6öçFVçB#¦6öçFVçGĞ ¤çWB‚"ö’öÆ–æ¶VF–â÷7W÷'F–ærÖf–ÆW2÷¶f–ÆUö–GÒ"¦FVbÆ–æ¶VF–å÷7W÷'F–æuöf–ÆU÷WFFR†f–ÆUö–C¢7G"Â&W¢7W÷'F–ætf–ÆUWFFU&WVW7B“ ¢v—F‚F%ö6öæâ‚’23¢7W"Ò2æW†V7WFR‚%UDDRÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW24UBF—FÆSÒW2Æ6öçFVçCÒW2ÇWFFVEöCÔäõr‚’t„U$R–CÒW2"Â‡&WçF—FÆRÇ&Wæ6öçFVçBÆf–ÆUö–B’“²2æ6öÖÖ—B‚¢–bæ÷B7W"ç&÷v6÷VçC¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜M˜]˜M˜Š}˜MŠıŠ}‹˜R‹­˜­‹˜]˜ŠÍ˜Šò"¢&WGW&â²'6fVB#¥G'VRÂ&–B#¦f–ÆUö–GĞ ¤æFVÆWFR‚"ö’öÆ–æ¶VF–â÷7W÷'F–ærÖf–ÆW2÷¶f–ÆUö–GÒ"¦FVbÆ–æ¶VF–å÷7W÷'F–æuöf–ÆUöFVÆWFR†f–ÆUö–C¢7G"“ ¢v—F‚F%ö6öæâ‚’23¢7W"Ò2æW†V7WFR‚$DTÄUDRe$ôÒÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2t„U$R–CÒW2"Â†f–ÆUö–BÂ’“²2æ6öÖÖ—B‚¢&WGW&â²&FVÆWFVB#¦&ööÂ†7W"ç&÷v6÷VçB—Ğ ¦FVb÷7W÷'F–æu÷Fb‡&V6÷&B“ ¢g&öÒ&W÷'FÆ"çFfvVâ–×÷'B6çf0¢g&öÒ&W÷'FÆ"æÆ–"çvW6—¦W2–×÷'B@¢g&öÒ&W÷'FÆ"æÆ–"æ6öÆ÷'2–×÷'B†W„6öÆ÷ ¢g&öÒ&W÷'FÆ"æÆ–"çWF–Ç2–×÷'B–ÖvU&VFW ¢g&öÒ”Â–×÷'B–ÖvRÂ–ÖvTG&rÂ–ÖvTföç@¢föçE÷F‚Ò$4UôD•"ò&76WG2"ò&föçG2"ò$6—&òçGFb ¢–bæ÷BföçE÷F‚æW†—7G2‚“¢&—6R…EEW†6WF–öâƒSÂ-Ší‹r6—&ò‹­˜­‹˜]˜ŠÍ˜Šò˜˜¢Š}˜MŠíŠ}Šı˜R"¢÷WBÒ–òä'—FW4”ò‚“²v–GF‚Â†V–v‡BÒC²2Ò6çf2ä6çf2†÷WBÂvW6—¦SÔBÂvT6ö×&W76–öãÓ¢æg’Â7–âÂ–æ²Â×WFVBÂÆRÒÖ„†W„6öÆ÷"Â‚"3sƒ#r"Â"3„3t3""Â"3$#CR"Â"3Scsƒb"Â"4c$ctd"’¢Ö&v–âÂ&–v‡BÂ’ÂvRÒCBÂv–GF‚ÓCBÂ†V–v‡BÓbÂ ¢66ÆSÓ0¢föçEö66†S×·Ğ¢ÖV7W&UöG&sÔ–ÖvTG&räG&r„–ÖvRææWr‚%$t$"Âƒ"Ã"’’¢FVb–ÅöföçB‡6—¦R“ ¢¶W“Ö–çB‡6—¦R§66ÆR¢–b¶W’æ÷B–âföçEö66†S¢föçEö66†U¶¶W•ÓÔ–ÖvTföçBçG'VWG—R‡7G"†föçE÷F‚’Æ¶W’¢&WGW&âföçEö66†U¶¶W•Ğ¢FVbFW‡E÷v–GF‚‡fÇVRÇ6—¦R“¢&WGW&âÖV7W&UöG&rçFW‡FÆVæwF‚‡7G"‡fÇVR’ÆföçC×–ÅöföçB‡6—¦R’ÆF—&V7F–öãÒ''FÂ"ÆÆæwVvSÒ&""’÷66ÆP¢FVbG&u÷'FÂ‡fÇVRÇ…÷&–v‡BÇ•ö&6VÆ–æRÇ6—¦RÆ6öÆ÷"“ ¢fÇVS×7G"‡fÇVR“²föçC×–ÅöföçB‡6—¦R“²&÷ƒÖÖV7W&UöG&rçFW‡F&&÷‚‚ƒÃ’ÇfÇVRÆföçCÖföçBÆF—&V7F–öãÒ''FÂ"ÆÆæwVvSÒ&""Ç7G&ö¶U÷v–GFƒÓ¢…÷sÖÖ‚ƒ"Æ&÷…³%ÒÖ&÷…³Ò³§66ÆR“²…öƒÖÖ‚ƒ"Æ&÷…³5ÒÖ&÷…³Ò³b§66ÆR¢–ÖvSÔ–ÖvRææWr‚%$t$"Â‡…÷rÇ…ö‚’Âƒ#SRÃ#SRÃ#SRÃ’“²G&sÔ–ÖvTG&räG&r†–ÖvR¢–b6öÆ÷"ç7F'G7v—F‚‚#‚"“¢6öÆ÷#Ò"2"¶6öÆ÷%³#¥Ğ¢&v#×GWÆR†–çB†6öÆ÷%¶“¦’³%ÒÃb’f÷"’–âƒÃ2ÃR’’²ƒ#SRÂ¢G&rçFW‡B‚‡…÷rÓB§66ÆRÂÖ&÷…³Ò³"§66ÆR’ÇfÇVRÆföçCÖföçBÆf–ÆÃ×&v"Ææ6†÷#Ò'&"ÆF—&V7F–öãÒ''FÂ"ÆÆæwVvSÒ&""¢E÷rÇEöƒ×…÷r÷66ÆRÇ…ö‚÷66ÆP¢2æG&t–ÖvR„–ÖvU&VFW"†–ÖvR’Ç…÷&–v‡B×E÷rÇ•ö&6VÆ–æRÒ‡Eö‚¢ãs"’Çv–GFƒ×E÷rÆ†V–v‡C×Eö‚ÆÖ6³Ò&WFò"¢FVbvU÷7F'B‚“ ¢æöæÆö6Â’ÇvS²vR³Ó²2ç6WDf–ÆÄ6öÆ÷"†æg’“²2ç&V7BƒÆ†V–v‡BÓs‚Çv–GF‚Ãs‚Ç7G&ö¶SÓÆf–ÆÃÓ“²2ç6WE7G&ö¶T6öÆ÷"†7–â“²2ç6WDÆ–æUv–GF‚ƒ2“²2æÆ–æR†Ö&v–âÆ†V–v‡BÓs‚Ç&–v‡BÆ†V–v‡BÓs‚“²G&u÷'FÂ‚-˜mŠ‹b‹=˜­Š‹Š}˜m˜¢"Ç&–v‡BÆ†V–v‡BÓ3BÃrÂ"3„3t3""“²G&u÷'FÂ‚-˜]‹˜M˜˜]Š’˜]˜Š½˜˜-Š’ââ˜Šİ˜]Š}˜­Š’Š­ŠŠıŠ2ŠŠ}˜M˜‹˜¢"Ç&–v‡BÆ†V–v‡BÓSRÃ‚ãRÂ"4Ctdddb"“²2ç6WDf–ÆÄ6öÆ÷"†×WFVB“²2ç6WDföçB‚$†VÇfWF–6"Ã‚“²2æG&u7G&–ær†Ö&v–âÃ#BÆb$5”$U"TÅ4RÂ·vWÒ"“²“Ö†V–v‡BÓ ¢FVbVç7W&R‡76R“ ¢æöæÆö6Â¢–b’×76SÃCƒ¢2ç6†÷uvR‚“²vU÷7F'B‚¢FVbÆöv–6Å÷w&‡FW‡BÇ6—¦RÆÖ…÷v–GF‚“ ¢v÷&G3×7G"‡FW‡B’ç7Æ—B‚“²Æ–æW3ÕµÓ²Æ–æSÒ" ¢f÷"v÷&B–âv÷&G3 ¢FW7CÖb'¶Æ–æWÒ·v÷&GÒ"ç7G&—‚¢–bÆ–æRæBFW‡E÷v–GF‚‡FW7BÇ6—¦R“æÖ…÷v–GFƒ¢Æ–æW2æVæB†Æ–æR“²Æ–æS×v÷&@¢VÇ6S¢Æ–æS×FW7@¢–bÆ–æS¢Æ–æW2æVæB†Æ–æR¢&WGW&âÆ–æW0¢FVb&Æö6²‡FW‡BÇ6—¦SÓãRÆ6öÆ÷#Ö–æ²ÆÆVF–æsÓ‚Æ'VÆÆWCÔfÇ6R“ ¢æöæÆö6Â¢Æ–æW3ÖÆöv–6Å÷w&‡FW‡BÇ6—¦RÇ&–v‡BÖÖ&v–âÒƒ‚–b'VÆÆWBVÇ6R’“²Vç7W&R†Ö‚†ÆVF–ærÆÆVâ†Æ–æW2’¦ÆVF–ær³b’¢f÷"’ÆÆ–æR–âVçVÖW&FR†Æ–æW2“ ¢G&u÷'FÂ†Æ–æRÇ&–v‡BÒƒ‚–b'VÆÆWBVÇ6R’Ç’Ç6—¦RÆ6öÆ÷"æ†W‡fÂ‚’¢–b'VÆÆWBæB“ÓÓ¢2ç6WDf–ÆÄ6öÆ÷"†7–â“²2æ6—&6ÆR‡&–v‡BÓbÇ’³2Ã"ãrÇ7G&ö¶SÓÆf–ÆÃÓ“²2ç6WDf–ÆÄ6öÆ÷"†6öÆ÷"¢’ÓÖÆVF–æp¢’ÓÓP¢vU÷7F'B‚¢f÷"&r–â&V6÷&E²&6öçFVçB%Òç7Æ—FÆ–æW2‚“ ¢Æ–æS×&rç7G&—‚¢–bæ÷BÆ–æS¢’ÓÓc²6öçF–çVP¢–bÆ–æRç7F'G7v—F‚‚"2"“¢Vç7W&RƒƒR“²2ç6WDf–ÆÄ6öÆ÷"‡ÆR“²2ç&÷VæE&V7B†Ö&v–âÇ’ÓS‚Ç&–v‡BÖÖ&v–âÃs"ÃÇ7G&ö¶SÓÆf–ÆÃÓ“²&Æö6²†Æ–æU³#¥ÒÃ‚Ææg’Ã#R“²’ÓÓ ¢VÆ–bÆ–æRç7F'G7v—F‚‚"22"“¢Vç7W&RƒC‚“²’ÓÓS²&Æö6²†Æ–æU³3¥ÒÃ2ãRÄ†W„6öÆ÷"‚"3ƒtcƒ""’Ã#"“²2ç6WE7G&ö¶T6öÆ÷"„†W„6öÆ÷"‚"43tS„Sr"’“²2æÆ–æR†Ö&v–âÇ’³RÇ&–v‡BÇ’³R“²’ÓÓp¢VÆ–bÆ–æRç7F'G7v—F‚‚‚"Ò"Â.(
+""’“¢&Æö6²†Æ–æU³#¥ÒÃã"Æ–æ²Ã‚Æ'VÆÆWCÕG'VR¢VÇ6S¢&Æö6²†Æ–æRÃãRÆ–æ²Ã‚¢2ç6fR‚“²÷WBç6VV²ƒ“²&WGW&â÷WBævWGfÇVR‚ ¤ævWB‚"ö’öÆ–æ¶VF–â÷7W÷'F–ærÖf–ÆW2÷¶f–ÆUö–GÒ÷Fb"¦FVbÆ–æ¶VF–å÷7W÷'F–æuöf–ÆU÷Fb†f–ÆUö–C¢7G"“ ¢v—F‚F%ö6öæâ‚’23¢&V6÷&BÒ2æW†V7WFR‚%4TÄT5B–BÇF—FÆRÆ6öçFVçBe$ôÒÆ–æ¶VF–å÷7W÷'F–æuöf–ÆW2t„U$R–CÒW2"Â†f–ÆUö–BÂ’’æfWF6†öæR‚¢–bæ÷B&V6÷&C¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜M˜]˜M˜Š}˜MŠıŠ}‹˜R‹­˜­‹˜]˜ŠÍ˜Šò"¢6fRÒ&Rç7V"‡"%µäÕ¦×£Ó•òÕÒ²"Â"Ò"Â&V6÷&E²'F—FÆR%Ò’ç7G&—‚"Ò"•³£cÒ÷"&7–&W"×VÇ6R×7W÷'F–ærÖf–ÆR ¢&WGW&â&W7öç6R…÷7W÷'F–æu÷Fb‡&V6÷&B’ÂÖVF–÷G—SÒ&Æ–6F–öâ÷Fb"Â†VFW'3×²$6öçFVçBÔF—7÷6—F–öâ#¦bvGF6†ÖVçC²f–ÆVæÖSÒ'·6fWÒçFb"rÂ$66†RÔ6öçG&öÂ#¢&æò×7F÷&R'Ò ¤Ä”ä´TD”åôäÅ•D”55ôÄ”4U2Ò°¢'&V6÷&EöFFR#¢²&FFR"Â&F’"Â'÷7FVBFFR"Â'V&Æ—6‚FFR"Â&7&VFVBFFR"Â-Š}˜MŠ­Š}‹˜­Šâ"Â-Š­Š}‹˜­ŠâŠ}˜M˜m‹M‹%ÒÀ¢'÷7E÷F—FÆR#¢²'÷7BF—FÆR"Â'F—FÆR"Â'÷7B"Â&6öçFVçB"Â'÷7BFW‡B"Â-Š}‹=˜RŠ}˜M˜]˜m‹M˜‹"Â-‹˜m˜Š}˜bŠ}˜M˜]˜m‹M˜‹"Â-Š}˜M˜]ŠİŠ­˜˜’%ÒÀ¢'÷7E÷W&Â#¢²'÷7BW&Â"Â'÷7BÆ–æ²"Â'W&Â"Â&Æ–æ²"Â-‹Š}Š‹rŠ}˜M˜]˜m‹M˜‹"Â-Š}˜M‹Š}Š‹r%ÒÀ¢'÷7E÷G—R#¢²'÷7BG—R"Â&6öçFVçBG—R"Â&f÷&ÖB"Â-˜m˜‹’Š}˜M˜]˜m‹M˜‹"Â-˜m˜‹’Š}˜M˜]ŠİŠ­˜˜’%ÒÀ¢&–×&W76–öç2#¢²&–×&W76–öç2"Â'÷7B–×&W76–öç2"Â'f–Ww2"Â-Š}˜M˜]‹MŠ}˜}ŠıŠ}Š¢"Â-˜]‹Š}Š¢Š}˜M‹˜}˜‹%ÒÀ¢&ÖVÖ&W'5÷&V6†VB#¢²&ÖVÖ&W'2&V6†VB"Â'Væ—VR–×&W76–öç2"Â'&V6‚"Â-Š}˜M˜‹]˜˜B"Â-Š}˜MŠ=‹‹mŠ}ŠŠ}˜M‹˜­˜bŠ­˜RŠ}˜M˜‹]˜˜BŠ]˜M˜­˜}˜R%ÒÀ¢&VævvVÖVçG5÷&W÷'FVB#¢²&VævvVÖVçG2"Â'F÷FÂVævvVÖVçG2"Â&VævvVÖVçB"Â-Š]ŠÍ˜]Š}˜M˜¢Š}˜MŠ­˜Š}‹˜B"Â-Š}˜MŠ­˜Š}‹˜B%ÒÀ¢'&V7F–öç2#¢²'&V7F–öç2"Â&Æ–¶W2"Â'&V7F–öâ6÷VçB"Â-Š}˜MŠ­˜Š}‹˜MŠ}Š¢"Â-Š}˜MŠ]‹ŠÍŠ}ŠŠ}Š¢%ÒÀ¢&6öÖÖVçG2#¢²&6öÖÖVçG2"Â&6öÖÖVçB6÷VçB"Â-Š}˜MŠ­‹˜M˜­˜-Š}Š¢%ÒÀ¢'&W÷7G2#¢²'&W÷7G2"Â'&W6†&W2"Â'6†&W2"Â'&W÷7B6÷VçB"Â-Š]‹Š}ŠıŠ’Š}˜M˜m‹M‹"Â-Š}˜M˜]‹MŠ}‹˜=Š}Š¢%ÒÀ¢'6fW2#¢²'6fW2"Â'÷7B6fW2"Â-Šİ˜‹‚"Â-‹˜]˜M˜­Š}Š¢Š}˜MŠİ˜‹‚%ÒÀ¢'6VæG2#¢²'6VæG2"Â'÷7B6VæG2"Â'6VæB6÷VçB"Â-‹˜]˜M˜­Š}Š¢Š}˜MŠ]‹‹=Š}˜B%ÒÀ¢&Æ–æµö6Æ–6·2#¢²&Æ–æ²6Æ–6·2"Â&6Æ–6·2"Â-Š}˜M˜m˜-‹Š}Š¢"Â-˜m˜-‹Š}Š¢Š}˜M‹Š}Š‹r%ÒÀ¢&föÆÆ÷vW'5öv–æVB#¢²&föÆÆ÷vW'2v–æVB"Â&æWrföÆÆ÷vW'2"Â-˜]Š­Š}Š‹˜˜bŠÍŠıŠò"Â-Š}˜M˜]Š­Š}Š‹˜˜bŠ}˜MŠÍŠıŠò%ÒÀ¢'&öf–ÆU÷f–Ww2#¢²'&öf–ÆRf–Ww2g&öÒ÷7B"Â'&öf–ÆRf–Ww2"Â-˜]‹MŠ}˜}ŠıŠ}Š¢Š}˜M˜]˜M˜Š}˜M‹MŠí‹]˜¢%ÒÀ§Ğ ¦FVböæÇ—F–75ö†VFW"‡fÇVR“ ¢&WGW&â&Rç7V"‡"%µæ×£Ó•ÇScÕÇSffeÒ²"Â""Â7G"‡fÇVR÷"""’ç7G&—‚’æÆ÷vW"‚’’ç7G&—‚ ¤äÅ•D”55ô„TDU%ôÔÒ²öæÇ—F–75ö†VFW"†Æ–2“¢¶W’f÷"¶W’ÂÆ–6W2–âÄ”ä´TD”åôäÅ•D”55ôÄ”4U2æ—FV×2‚’f÷"Æ–2–âÆ–6W2Ğ¤äÅ•D”55ôÔUE$”52Ò‚&–×&W76–öç2"Â&ÖVÖ&W'5÷&V6†VB"Â&VævvVÖVçG5÷&W÷'FVB"Â'&V7F–öç2"Â&6öÖÖVçG2"Â'&W÷7G2"Â'6fW2"Â'6VæG2"Â&Æ–æµö6Æ–6·2"Â&föÆÆ÷vW'5öv–æVB"Â'&öf–ÆU÷f–Ww2" ¦FVböæÇ—F–75ö–çB‡fÇVR“ ¢–bfÇVR—2æöæR÷"fÇVRÓÒ"#¢&WGW&â ¢–b—6–ç7Fæ6R‡fÇVRÂ†–çBÆfÆöB’“¢&WGW&âÖ‚ƒÂ–çB‡fÇVR’¢FW‡BÒ7G"‡fÇVR’ç7G&—‚’ç&WÆ6R‚"Â"Â""’ç&WÆ6R‚-šÂ"Â""’ç&WÆ6R‚"R"Â""¢ÖF6‚Ò&Rç6V&6‚‡""ÓõÆB²ƒó¥ÂåÆB²“ò"ÂFW‡B¢&WGW&âÖ‚ƒÂ–çB†fÆöB†ÖF6‚æw&÷W‚’’’’–bÖF6‚VÇ6R  ¦FVböæÇ—F–75öFFR‡fÇVR“ ¢–b—6–ç7Fæ6R‡fÇVRÂFFWF–ÖR“¢&WGW&âfÇVRæFFR‚¢–b—6–ç7Fæ6R‡fÇVRÂFFR“¢&WGW&âfÇVP¢FW‡BÒ7G"‡fÇVR÷"""’ç7G&—‚¢f÷"f×B–â‚"U’ÒVÒÒVB"Â"VÒòVBòU’"Â"VBòVÒòU’"Â"V"VBÂU’"Â"VBV"U’"“ ¢G'“¢&WGW&âFFWF–ÖRç7G'F–ÖR‡FW‡BÂf×B’æFFR‚¢W†6WBfÇVTW'&÷#¢70¢&WGW&âæöæP ¦FVböæÇ—F–75÷÷7E÷W&â‡W&Â“ ¢ÖF6‚Ò&Rç6V&6‚‡"'W&ã¦Æ“¢ƒó§6†&WÇVv5÷7B“¥ÆB²"Â7G"‡W&Â÷"""’¢&WGW&âÖF6‚æw&÷W‚’–bÖF6‚VÇ6RæöæP ¦FVb÷'6UöÆ–æ¶VF–å÷†Ç7‚‡&s¢'—FW2“ ¢g&öÒ÷Vç—†Â–×÷'BÆöE÷v÷&¶&öö°¢G'“¢v÷&¶&öö²ÒÆöE÷v÷&¶&öö²†–òä'—FW4”ò‡&r’Â&VEööæÇ“ÕG'VRÂFFööæÇ“ÕG'VR¢W†6WBW†6WF–öâ2W†3¢&—6R…EEW†6WF–öâƒCÂb-Š­‹‹‹˜-‹Š}ŠŠ’˜]˜M˜„Å5ƒ¢·7G"†W†2•³£3×Ò"¢'6VCÕµĞ¢f÷"6†VWB–âv÷&¶&öö²çv÷&·6†VWG3 ¢&÷w3Õ·GWÆR‡&÷u³£cÒ’f÷"&÷r–â—FW'FööÇ2æ—6Æ–6R‡6†VWBæ—FW%÷&÷w2‡fÇVW5ööæÇ“ÕG'VR’ÃS•Ğ¢†VFW%ö–æFWƒÔæöæS²6öÇVÖç3×·Ğ¢f÷"–G‚Ç&÷r–âVçVÖW&FR‡&÷w5³£3Ò“ ¢ÖVC×·÷3¤äÅ•D”55ô„TDU%ôÔævWB…öæÇ—F–75ö†VFW"‡fÇVR’’f÷"÷2ÇfÇVR–âVçVÖW&FR‡&÷r—Ğ¢ÖVC×·÷3¦¶W’f÷"÷2Æ¶W’–âÖVBæ—FV×2‚’–b¶W—Ğ¢ÖWG&–5ö6÷VçC×7VÒ†¶W’–âäÅ•D”55ôÔUE$”52f÷"¶W’–âÖVBçfÇVW2‚’¢–bÖWG&–5ö6÷VçBãÒæB‚'&V6÷&EöFFR"–âÖVBçfÇVW2‚’÷"'÷7E÷F—FÆR"–âÖVBçfÇVW2‚’÷"'÷7E÷W&Â"–âÖVBçfÇVW2‚’“¢†VFW%ö–æFWƒÖ–Gƒ²6öÇVÖç3ÖÖVC²'&V°¢–b†VFW%ö–æFW‚—2æöæS¢6öçF–çVP¢6†VWE÷&÷w3ÕµĞ¢f÷"&÷r–â&÷w5¶†VFW%ö–æFW‚³¥Ó ¢—FVÓ×¶¶W“¢‡&÷u·÷5Ò–b÷3ÆÆVâ‡&÷r’VÇ6RæöæR’f÷"÷2Æ¶W’–â6öÇVÖç2æ—FV×2‚—Ğ¢ÖWG&–73×¶¶W“¥öæÇ—F–75ö–çB†—FVÒævWB†¶W’’’f÷"¶W’–âäÅ•D”55ôÔUE$”57Ğ¢F—FÆS×7G"†—FVÒævWB‚'÷7E÷F—FÆR"’÷"""’ç7G&—‚“²W&Ã×7G"†—FVÒævWB‚'÷7E÷W&Â"’÷"""’ç7G&—‚“²&V6÷&EöFFSÕöæÇ—F–75öFFR†—FVÒævWB‚'&V6÷&EöFFR"’¢–bæ÷Bç’†ÖWG&–72çfÇVW2‚’’÷"æ÷B‡F—FÆR÷"W&Â÷"&V6÷&EöFFR“¢6öçF–çVP¢6†VWE÷&÷w2æVæB‡²'&V6÷&Eö¶–æB#¢'÷7B"–bF—FÆR÷"W&ÂVÇ6R&F–Ç’"Â'&V6÷&EöFFR#§&V6÷&EöFFRÂ'÷7E÷W&â#¥öæÇ—F–75÷÷7E÷W&â‡W&Â’Â'÷7E÷W&Â#§W&Å³£#Ò÷"æöæRÂ'÷7E÷F—FÆR#§F—FÆU³£#ÒÂ'÷7E÷G—R#§7G"†—FVÒævWB‚'÷7E÷G—R"’÷"""’ç7G&—‚•³£#ÒÂ¢¦ÖWG&–77Ò¢FWF–ÆVCÖç’‡…²'&V6÷&Eö¶–æB%ÓÓÒ'÷7B"÷"…²'&V6÷&EöFFR%Òf÷"‚–â6†VWE÷&÷w2¢'6VBæW‡FVæB‡‚f÷"‚–â6†VWE÷&÷w2–bæ÷BFWF–ÆVB÷"…²'&V6÷&Eö¶–æB%ÓÓÒ'÷7B"÷"…²'&V6÷&EöFFR%Ò¢–bæ÷B'6VC¢&—6R…EEW†6WF–öâƒCÂ-˜M˜RŠ=ŠÍŠòŠÍŠı˜˜BŠ­Šİ˜M˜­˜MŠ}Š¢˜]‹‹˜˜˜½Šrâ‹]Šı™‹˜]˜M˜÷7BæÇ—F–72Š‹]˜­‹­Š’„Å5‚˜]˜bÆ–æ¶VD–âŠ½˜RŠ}‹˜‹˜r˜=˜]Šr˜}˜‚â"¢&WGW&â'6V@ ¦FVb÷6fUöæÇ—F–75ö–×÷'B‡6÷W&6RÂf–ÆVæÖRÂ&V6÷&G2“ ¢–×÷'Eö–C×7G"‡WV–BçWV–CB‚’“²FFW3Õ·%²'&V6÷&EöFFR%Òf÷""–â&V6÷&G2–b"ævWB‚'&V6÷&EöFFR"•Ğ¢v—F‚F%ö6öæâ‚’23 ¢2æW†V7WFR‚$”å4U%B”åDòÆ–æ¶VF–åöæÇ—F–75ö–×÷'G2†–BÇ6÷W&6RÆf–ÆVæÖRÇ&÷uö6÷VçBÇW&–öE÷7F'BÇW&–öEöVæB’dÅTU2‚W2ÂW2ÂW2ÂW2ÂW2ÂW2’"Â†–×÷'Eö–BÇ6÷W&6RÆf–ÆVæÖRÆÆVâ‡&V6÷&G2’ÆÖ–â†FFW2’–bFFW2VÇ6RæöæRÆÖ‚†FFW2’–bFFW2VÇ6RæöæR’¢f÷""–â&V6÷&G3 ¢2æW†V7WFR‚$”å4U%B”åDòÆ–æ¶VF–åöæÇ—F–75÷&V6÷&G2†–BÆ–×÷'Eö–BÇ&V6÷&Eö¶–æBÇ&V6÷&EöFFRÇ÷7E÷W&âÇ÷7E÷W&ÂÇ÷7E÷F—FÆRÇ÷7E÷G—RÆ–×&W76–öç2ÆÖVÖ&W'5÷&V6†VBÆVævvVÖVçG5÷&W÷'FVBÇ&V7F–öç2Æ6öÖÖVçG2Ç&W÷7G2Ç6fW2Ç6VæG2ÆÆ–æµö6Æ–6·2ÆföÆÆ÷vW'5öv–æVBÇ&öf–ÆU÷f–Ww2’dÅTU2‚W2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW2’"Â‡7G"‡WV–BçWV–CB‚’’Æ–×÷'Eö–BÇ"ævWB‚'&V6÷&Eö¶–æB"Â'÷7B"’Ç"ævWB‚'&V6÷&EöFFR"’Ç"ævWB‚'÷7E÷W&â"’Ç"ævWB‚'÷7E÷W&Â"’Ç"ævWB‚'÷7E÷F—FÆR"Â""’Ç"ævWB‚'÷7E÷G—R"Â""’Â¥·"ævWB†²Ã’f÷"²–âäÅ•D”55ôÔUE$”55Ò’¢2æ6öÖÖ—B‚¢&WGW&â–×÷'Eö–@ ¤ç÷7B‚"ö’öÆ–æ¶VF–âöæÇ—F–72ö–×÷'B"¦7–æ2FVbÆ–æ¶VF–åöæÇ—F–75ö–×÷'B†f–ÆS¢WÆöDf–ÆRÒf–ÆR‚âââ’“ ¢f–ÆVæÖS×7G"†f–ÆRæf–ÆVæÖR÷"&Æ–æ¶VF–âÖæÇ—F–72ç†Ç7‚"¢–bæ÷Bf–ÆVæÖRæÆ÷vW"‚’æVæG7v—F‚‚"ç†Ç7‚"“¢&—6R…EEW†6WF–öâƒCRÂ-Š}‹˜‹’˜]˜M˜Æ–æ¶VD–âæÇ—F–72Š‹]˜­‹­Š’„Å5‚"¢&sÖv—Bf–ÆRç&VBƒ£#B£#B³¢–bÆVâ‡&r“ã£#B£#C¢&—6R…EEW†6WF–öâƒC2Â-ŠİŠÍ˜RŠ}˜M˜]˜M˜˜­Š­ŠÍŠ}˜‹"Ô""¢–bæ÷B&rç7F'G7v—F‚†"%²"“¢&—6R…EEW†6WF–öâƒCÂ-˜]˜M˜„Å5‚‹­˜­‹‹]Š}˜MŠÒ"¢&V6÷&G3Õ÷'6UöÆ–æ¶VF–å÷†Ç7‚‡&r“²–×÷'Eö–CÕ÷6fUöæÇ—F–75ö–×÷'B‚'†Ç7‚"Æf–ÆVæÖRÇ&V6÷&G2¢&WGW&â²&–×÷'FVB#¥G'VRÂ&–×÷'Eö–B#¦–×÷'Eö–BÂ'&÷uö6÷VçB#¦ÆVâ‡&V6÷&G2’Â&f–ÆVæÖR#¦f–ÆVæÖWĞ ¦FVböæÇ—F–75öÖWG&–5÷fÇVR‡&V6÷&G2ÂÖWG&–2“ ¢F÷FÅ÷&÷w3Õ·"f÷""–â&V6÷&G2–b%²'&V6÷&Eö¶–æB%ÓÓÒ&vw&VvFU÷F÷FÂ"æB%¶ÖWG&–5ÕĞ¢–bF÷FÅ÷&÷w3¢&WGW&âÖ‚‡%¶ÖWG&–5Òf÷""–âF÷FÅ÷&÷w2¢F–Ç“Õ·"f÷""–â&V6÷&G2–b%²'&V6÷&Eö¶–æB%ÓÓÒ&F–Ç’%Ğ¢&6SÖF–Ç’–bF–Ç’VÇ6R·"f÷""–â&V6÷&G2–b%²'&V6÷&Eö¶–æB%ÓÓÒ'÷7B%Ğ¢&WGW&â7VÒ‡%¶ÖWG&–5Òf÷""–â&6R ¦FVböæÇ—F–75÷&V6öÖÖVæFF–öç2‡&V6÷&G2ÂF÷÷÷7G2Â'•÷G—RÂ'•÷vVV¶F’ÂVævvVÖVçE÷&FR“ ¢F—3ÕµĞ¢–b'•÷G—S ¢&W7CÖÖ‚†'•÷G—RÆ¶W“ÖÆÖ&Fƒ¢‡…²&VævvVÖVçE÷&FR%ÒÇ…²&–×&W76–öç2%Ò’¢F—2æVæB‡²'F—FÆR#¢-˜=‹™‹Š}˜M‹]˜­‹­Š’Š}˜MŠ=˜-˜˜’"Â'FW‡B#¦b-‹]˜­‹­Š’¶&W7E²vÆ&VÂu×ÒŠİ˜-˜-Š¢Š=˜‹m˜B˜]‹Šı˜BŠ­˜Š}‹˜B‡¶&W7E²vVævvVÖVçE÷&FRuÓ¢ãgÒR’âŠí‹]‹R˜M˜}Šr˜]˜m‹M˜‹˜½Šr˜Š}ŠİŠı˜½Šr‹˜M˜’Š}˜MŠ=˜-˜BŠ=‹=Š˜‹˜­˜½Šrâ'Ò¢–b'•÷vVV¶F“ ¢&W7CÖÖ‚†'•÷vVV¶F’Æ¶W“ÖÆÖ&Fƒ¢‡…²&VævvVÖVçE÷&FR%ÒÇ…²&–×&W76–öç2%Ò’¢F—2æVæB‡²'F—FÆR#¢-Š}ŠíŠ­Š‹˜­˜˜RŠ}˜MŠ=ŠıŠ}ŠŠ}˜MŠ=˜‹m˜B"Â'FW‡B#¦b-Š=˜‹m˜B˜mŠ­˜­ŠÍŠ’Š­Š}‹˜­Ší˜­Š’‹˜}‹Š¢˜­˜˜R¶&W7E²vÆ&VÂu×ÒâŠ}˜m‹M‹˜˜­˜r˜]˜‹m˜‹˜½Šr‹Šm˜­‹=˜­˜½ŠrŠí˜MŠ}˜BŠ}˜MŠ=‹=Š}Š˜­‹’Š}˜MŠ½˜MŠ}Š½Š’Š}˜M˜-Š}Šı˜]Š’˜˜-Š}‹˜bŠ}˜M˜mŠ­˜­ŠÍŠ’â'Ò¢–bF÷÷÷7G3 ¢F—2æVæB‡²'F—FÆR#¢-Šİ˜™˜BŠ}˜M˜Š}Šm‹"Š]˜M˜’‹=˜M‹=˜MŠ’"Â'FW‡B#¦b-Š}˜M˜]˜m‹M˜‹Š}˜MŠ=˜-˜˜’*··F÷÷÷7G5³Õ²wF—FÆRuÕ³£“×Ü+²˜­‹=Š­Šİ˜"˜]˜m‹M˜‹˜]Š­Š}Š‹Š’˜„6†V6¶Æ—7BŠ=˜‚6&÷W6VÂ˜­˜=˜]˜BŠ}˜M˜˜=‹Š’˜m˜‹=˜}Šrâ'Ò¢–bVævvVÖVçE÷&FRÂ# ¢F—2æVæB‡²'F—FÆR#¢-Š}‹˜‹’ŠÍ˜ŠıŠ’Š}˜MŠı‹˜Š’˜M˜MŠ­˜Š}‹˜B"Â'FW‡B#¢-˜]‹Šı˜BŠ}˜MŠ­˜Š}‹˜BŠ=˜-˜B˜]˜b"RâŠ}‹=Š­ŠíŠı˜R‹=ŠMŠ}˜B˜-‹Š}‹˜]ŠİŠıŠò˜˜¢˜m˜}Š}˜­Š’Š}˜M˜]˜m‹M˜‹ˆÂ˜Š}ŠíŠ­‹]‹Š}˜M˜]˜-Šı˜]ŠˆÂ˜Š}ŠÍ‹˜BŠ}˜M˜-˜­˜]Š’Š}˜M‹˜]˜M˜­Š’‹Š}˜}‹Š’˜˜¢Š=˜˜BŠ½˜MŠ}Š½Š’Š=‹=‹}‹â'Ò¢VÇ6S¢F—2æVæB‡²'F—FÆR#¢-ŠİŠ}˜‹‚‹˜M˜’Š}˜MŠ­˜Š}‹˜B"Â'FW‡B#¦b-˜]‹Šı˜BŠ}˜MŠ­˜Š}‹˜BŠ}˜MŠİŠ}˜M˜¢¶VævvVÖVçE÷&FS¢ãgÒRâ‹˜=™‹"‹˜M˜’Š}˜MŠİ˜‹‚˜Š}˜M˜]‹MŠ}‹˜=Š’‹Š‹˜]˜M˜Š}Š¢‹˜]˜M˜­Š’˜˜-˜Š}Šm˜RŠ­Šİ˜-˜"˜]‹Š­Š‹}Š’ŠŠ}˜M˜]˜m‹M˜‹â'Ò¢&WGW&âF—5³£EĞ ¤ævWB‚"ö’öÆ–æ¶VF–âöæÇ—F–72öF6†&ö&B"¦FVbÆ–æ¶VF–åöæÇ—F–75öF6†&ö&B‚“ ¢v—F‚F%ö6öæâ‚’23 ¢ÆFW7CÖ2æW†V7WFR‚%4TÄT5B¢e$ôÒÆ–æ¶VF–åöæÇ—F–75ö–×÷'G2õ$DU"%’7&VFVEöBDU42Ä”Ô•B"’æfWF6†öæR‚¢†—7F÷'“Ö2æW†V7WFR‚%4TÄT5B–BÇ6÷W&6RÆf–ÆVæÖRÇ&÷uö6÷VçBÇW&–öE÷7F'BÇW&–öEöVæBÆ7&VFVEöBe$ôÒÆ–æ¶VF–åöæÇ—F–75ö–×÷'G2õ$DU"%’7&VFVEöBDU42Ä”Ô•B""’æfWF6†ÆÂ‚¢&V6÷&G3Ö2æW†V7WFR‚%4TÄT5B¢e$ôÒÆ–æ¶VF–åöæÇ—F–75÷&V6÷&G2t„U$R–×÷'Eö–CÒW2"Â†ÆFW7E²&–B%ÒÂ’’æfWF6†ÆÂ‚’–bÆFW7BVÇ6RµĞ¢–bæ÷BÆFW7C¢&WGW&â²&V×G’#¥G'VRÂ&æÇ—F–75ö&÷fVB#¦÷2ævWFVçb‚$Ä”ä´TD”åôäÅ•D”55ô$õdTB"Â""’æÆ÷vW"‚’–â‚#"Â'G'VR"Â'–W2"’Â&†—7F÷'’#¥µ×Ğ¢F÷FÇ3×¶³¥öæÇ—F–75öÖWG&–5÷fÇVR‡&V6÷&G2Æ²’f÷"²–âäÅ•D”55ôÔUE$”57Ó²6Æ7VÆFVEöVævvVÖVçG3×7VÒ‡F÷FÇ5¶µÒf÷"²–â‚'&V7F–öç2"Â&6öÖÖVçG2"Â'&W÷7G2"Â'6fW2"Â'6VæG2"’“²VævvVÖVçG3×F÷FÇ5²&VævvVÖVçG5÷&W÷'FVB%Ò÷"6Æ7VÆFVEöVævvVÖVçG3²VævvVÖVçE÷&FSÒ†VævvVÖVçG2÷F÷FÇ5²&–×&W76–öç2%Ò£’–bF÷FÇ5²&–×&W76–öç2%ÒVÇ6R ¢÷7E÷&÷w3Õ·"f÷""–â&V6÷&G2–b%²'&V6÷&Eö¶–æB%ÓÓÒ'÷7B%Ğ¢F–Ç•÷&÷w3Õ·"f÷""–â&V6÷&G2–b%²'&V6÷&Eö¶–æB%ÓÓÒ&F–Ç’%Ğ¢G&VæEöÖ×·Ğ¢f÷""–âF–Ç•÷&÷w2–bF–Ç•÷&÷w2VÇ6R÷7E÷&÷w3 ¢–bæ÷B%²'&V6÷&EöFFR%Ó¢6öçF–çVP¢¶W“×%²'&V6÷&EöFFR%Òæ—6öf÷&ÖB‚“²&÷s×G&VæEöÖç6WFFVfVÇBzÛn­¢G§²ÚîÆ­yÖ–FVò†¦ö%ö–C¢7G"Âf–FVõöçVÖ&W#¢–çB“ ¢–bf–FVõöçVÖ&W"æ÷B–â³Â"Â7Ó¢&—6R…EEW†6WF–öâƒCBÂ-‹˜-˜RŠ}˜M˜˜­Šı˜­˜‚‹­˜­‹‹]Š}˜MŠÒ"¢v—F‚d•5TÅôÄU%Eô¤ô%5ôÄô4³¢¦ö"Òd•5TÅôÄU%Eô¤ô%2ævWB†¦ö%ö–B¢–bæ÷B¦ö"÷"¦ö"ævWB‚'7FGW2"’æ÷B–â²'&VG•öf÷%÷&Wf–Wr"Â&&÷fÅ÷&V6V—fVB"Â'&VæFW&–ær"Â&6ö×ÆWFVB'Ó¢&—6R…EEW†6WF–öâƒCBÂ-˜]‹Š}˜­˜mŠ’Š}˜M˜˜­Šı˜­˜‚‹­˜­‹ŠÍŠ}˜}‹-Š’"¢F‚ÒF‚†¦ö%²'v÷&µöF—"%Ò’òb'fVò×6÷W&6R×·f–FVõöçVÖ&W'Òæ×B ¢–bæ÷BF‚æW†—7G2‚“¢&—6R…EEW†6WF–öâƒCBÂ-˜MŠrŠ­˜ŠÍŠò˜M˜-‹}Š’˜˜­Šı˜­˜‚Š‹=ŠŠ‚ŠİŠı˜ŠòfVòŠ}˜MŠİŠ}˜M˜­Š’"¢&WGW&âf–ÆU&W7öç6R‡F‚ÂÖVF–÷G—SÒ'f–FVòö×B"Âf–ÆVæÖSÖb'&Wf–Wr×¶¦ö%ö–E³£…×Òæ×B" ¤ævWB‚"ö’÷f—7VÂÖÆW'B÷&Wf–WrÖVF–ò÷¶¦ö%ö–GÒ"¦FVbf—7VÅöÆW'E÷&Wf–WuöVF–ò†¦ö%ö–C¢7G"“ ¢v—F‚d•5TÅôÄU%Eô¤ô%5ôÄô4³¢¦ö"Òd•5TÅôÄU%Eô¤ô%2ævWB†¦ö%ö–B¢–bæ÷B¦ö"÷"¦ö"ævWB‚'7FGW2"’æ÷B–â²'&VG•öf÷%÷&Wf–Wr"Â&&÷fÅ÷&V6V—fVB"Â'&VæFW&–ær"Â&6ö×ÆWFVB'Ó¢&—6R…EEW†6WF–öâƒCBÂ-˜]‹Š}˜­˜mŠ’Š}˜M‹]˜Š¢‹­˜­‹ŠÍŠ}˜}‹-Š’"¢F‚ÒF‚†¦ö%²'v÷&µöF—"%Ò’ò'fö–6V÷fW"çvb ¢–bæ÷BF‚æW†—7G2‚“¢&—6R…EEW†6WF–öâƒCBÂ-˜]˜M˜Š}˜M‹]˜Š¢‹­˜­‹˜]˜ŠÍ˜Šò"¢&WGW&âf–ÆU&W7öç6R‡F‚ÂÖVF–÷G—SÒ&VF–ò÷vb"Âf–ÆVæÖSÖb'fö–6V÷fW"×¶¦ö%ö–E³£…×Òçvb" ¤ævWB‚"ö’÷f—7VÂÖÆW'B÷&Wf–WrÖ–ÖvR÷¶¦ö%ö–GÒ÷¶–ÖvUöçVÖ&W'Ò"¦FVbf—7VÅöÆW'E÷&Wf–Wuö–ÖvR†¦ö%ö–C¢7G"Â–ÖvUöçVÖ&W#¢–çB“ ¢–b–ÖvUöçVÖ&W"Â÷"–ÖvUöçVÖ&W"âc¢&—6R…EEW†6WF–öâƒCBÂ-‹˜-˜RŠ}˜M‹]˜‹Š’‹­˜­‹‹]Š}˜MŠÒ"¢v—F‚d•5TÅôÄU%Eô¤ô%5ôÄô4³¢¦ö"Òd•5TÅôÄU%Eô¤ô%2ævWB†¦ö%ö–B¢–bæ÷B¦ö"÷"¦ö"ævWB‚'7FGW2"’æ÷B–â²'&VG•öf÷%÷&Wf–Wr"Â&&÷fÅ÷&V6V—fVB"Â'&VæFW&–ær"Â&6ö×ÆWFVB'Ó¢&—6R…EEW†6WF–öâƒCBÂ-˜]‹Š}˜­˜mŠ’Š}˜M‹]˜‹Š’‹­˜­‹ŠÍŠ}˜}‹-Š’"¢F‚ÒF‚†¦ö%²'v÷&µöF—"%Ò’òb&’×66VæR×¶–ÖvUöçVÖ&W'Òæ§r ¢–bæ÷BF‚æW†—7G2‚“¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜M‹]˜‹Š’‹­˜­‹˜]˜ŠÍ˜ŠıŠ’"¢&WGW&âf–ÆU&W7öç6R‡F‚ÂÖVF–÷G—SÒ&–ÖvRö§Vr" ¤ævWB‚"ö’÷f—7VÂÖÆW'B÷f–FVò÷¶¦ö%ö–GÒ"¦FVbf—7VÅöÆW'E÷f–FVò†¦ö%ö–C¢7G"“ ¢v—F‚d•5TÅôÄU%Eô¤ô%5ôÄô4³¢¦ö"Òd•5TÅôÄU%Eô¤ô%2ævWB†¦ö%ö–B¢–bæ÷B¦ö"÷"¦ö"ævWB‚'7FGW2"’Ò&6ö×ÆWFVB#¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜M˜˜­Šı˜­˜‚‹­˜­‹ŠÍŠ}˜}‹""¢F‚ÒF‚†¦ö%²'v÷&µöF—"%Ò’ò'f—7VÂÖÆW'Bæ×B ¢–bæ÷BF‚æW†—7G2‚“¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜mŠ­˜}Š¢‹]˜MŠ}Šİ˜­Š’˜]˜M˜Š}˜M˜˜­Šı˜­˜‚"¢&WGW&âf–ÆU&W7öç6R‡F‚ÂÖVF–÷G—SÒ'f–FVòö×B"Âf–ÆVæÖSÖb&7–&W'VÇ6RÖÆW'B×¶¦ö%ö–E³£…×Òæ×B" ¦FVbövöövÆUöG&—fUö66W75÷Fö¶Vâ‚’Óâ7G# ¢&WV—&VBÒ¶¶W“¦÷2ævWFVçb†¶W’Â""’ç7G&—‚’f÷"¶W’–â‚$tôôtÄUôE$•dUô4Ä”TåEô”B"Â$tôôtÄUôE$•dUô4Ä”TåEõ4T5$UB"Â$tôôtÄUôE$•dUõ$Te$U4…õDô´Tâ"—Ğ¢Ö—76–ærÒ¶¶W’f÷"¶W’ÂfÇVR–â&WV—&VBæ—FV×2‚’–bæ÷BfÇVUĞ¢–bÖ—76–æs¢&—6RfÇVTW'&÷"‚-Š]‹ŠıŠ}ŠòvöövÆRG&—fR‹­˜­‹˜]˜=Š­˜]˜C¢"²"Â"æ¦ö–â†Ö—76–ær’¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÓ3ã’26Æ–VçC ¢&W7öç6RÒ6Æ–VçBç÷7B‚&‡GG3¢òööWFƒ"ævöövÆV—2æ6öÒ÷Fö¶Vâ"ÂFF×²&6Æ–VçEö–B#§&WV—&VE²$tôôtÄUôE$•dUô4Ä”TåEô”B%ÒÂ&6Æ–VçE÷6V7&WB#§&WV—&VE²$tôôtÄUôE$•dUô4Ä”TåEõ4T5$UB%ÒÂ'&Vg&W6…÷Fö¶Vâ#§&WV—&VE²$tôôtÄUôE$•dUõ$Te$U4…õDô´Tâ%ÒÂ&w&çE÷G—R#¢'&Vg&W6…÷Fö¶Vâ'Ò¢–bæ÷B&W7öç6Ræ—5÷7V66W73¢&—6RfÇVTW'&÷"†b-Š­‹‹‹Š­˜˜˜­‹bvöövÆRG&—fR„…EE·&W7öç6Rç7FGW5ö6öFWÒ“¢·&W7öç6RçFW‡E³£S×Ò"¢Fö¶VâÒ7G"‡&W7öç6Ræ§6öâ‚’ævWB‚&66W75÷Fö¶Vâ"Â""’¢–bæ÷BFö¶Vã¢&—6RfÇVTW'&÷"‚-˜M˜R˜­˜ı‹ŠÍ‹’vöövÆR‹˜]‹"˜‹]˜˜B‹]Š}˜MŠİ˜½Šr"¢&WGW&âFö¶Và ¦FVbövöövÆUöG&—fU÷WÆöB†æÖS¢7G"ÂÖ–ÖU÷G—S¢7G"Â–ÆöC¢'—FW2Â66W75÷Fö¶Vã¢7G"’ÓâF–7E·7G"Â7G%Ó ¢ÖWFFF¢F–7E·7G"Âç•ÒÒ²&æÖR#¦æÖWĞ¢föÆFW%ö–BÒ÷2ævWFVçb‚$tôôtÄUôE$•dUôdôÄDU%ô”B"Â""’ç7G&—‚¢–bföÆFW%ö–C¢ÖWFFF²'&VçG2%ÒÒ¶föÆFW%ö–EĞ¢†VFW'2Ò²$WF†÷&—¦F–öâ#¦b$&V&W"¶66W75÷Fö¶VçÒ"Â$6öçFVçBÕG—R#¢&Æ–6F–öâö§6öã²6†'6WCÕUDbÓ‚"Â%‚ÕWÆöBÔ6öçFVçBÕG—R#¦Ö–ÖU÷G—RÂ%‚ÕWÆöBÔ6öçFVçBÔÆVæwF‚#§7G"†ÆVâ‡–ÆöB’—Ğ¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÖ‡GG‚åF–ÖV÷WBƒ3ãÂ6öææV7CÓ3ã’ÂföÆÆ÷u÷&VF—&V7G3ÔfÇ6R’26Æ–VçC ¢7F'BÒ6Æ–VçBç÷7B‚&‡GG3¢ò÷wwrævöövÆV—2æ6öÒ÷WÆöBöG&—fR÷c2öf–ÆW3÷WÆöEG—S×&W7VÖ&ÆRg7W÷'G4ÆÄG&—fW3×G'VRff–VÆG3Ö–BÆæÖRÇvV%f–WtÆ–æ²"Â†VFW'3Ö†VFW'2Â§6öãÖÖWFFF¢–bæ÷B7F'Bæ—5÷7V66W72÷"æ÷B7F'Bæ†VFW'2ævWB‚$Æö6F–öâ"“¢&—6RfÇVTW'&÷"†b-Š­‹‹‹ŠŠıŠ‹˜‹’¶æÖWÒŠ]˜M˜’vöövÆRG&—fR„…EE·7F'Bç7FGW5ö6öFWÒ“¢·7F'BçFW‡E³£S×Ò"¢WÆöFVBÒ6Æ–VçBçWB‡7F'Bæ†VFW'5²$Æö6F–öâ%ÒÂ†VFW'3×²$6öçFVçBÕG—R#¦Ö–ÖU÷G—RÂ$6öçFVçBÔÆVæwF‚#§7G"†ÆVâ‡–ÆöB’—ÒÂ6öçFVçC×–ÆöB¢–bæ÷BWÆöFVBæ—5÷7V66W73¢&—6RfÇVTW'&÷"†b-Š­‹‹‹‹˜‹’¶æÖWÒŠ]˜M˜’vöövÆRG&—fR„…EE·WÆöFVBç7FGW5ö6öFWÒ“¢·WÆöFVBçFW‡E³£S×Ò"¢FFÒWÆöFVBæ§6öâ‚¢&WGW&â²&–B#§7G"†FFævWB‚&–B"Â""’’Â'W&Â#§7G"†FFævWB‚'vV%f–WtÆ–æ²"Â""’’Â&æÖR#§7G"†FFævWB‚&æÖR"ÂæÖR’—Ğ ¤ævWB‚"ö’÷f—7VÂÖÆW'Bö&6†—fW2"¦FVbf—7VÅöÆW'Eö&6†—fW2‚“ ¢v—F‚F%ö6öæâ‚’23 ¢&WGW&â2æW†V7WFR‚%4TÄT5B–BÇF—FÆRÆ6öçFVçBÇ&WV—&VEö7F–öâÆf÷&ÖGFVEö6öçFVçBÆG&—fU÷f–FVõ÷W&ÂÆG&—fU÷FW‡E÷W&ÂÆ7&VFVEöBe$ôÒf—7VÅöÆW'Eö&6†—fW2õ$DU"%’7&VFVEöBDU42Ä”Ô•B"’æfWF6†ÆÂ‚ ¤ç÷7B‚"ö’÷f—7VÂÖÆW'B÷6fR÷¶¦ö%ö–GÒ"¦FVb6fU÷f—7VÅöÆW'B†¦ö%ö–C¢7G"Â&W¢f—7VÅ6fU&WVW7B“ ¢v—F‚d•5TÅôÄU%Eô¤ô%5ôÄô4³¢¦ö"Òd•5TÅôÄU%Eô¤ô%2ævWB†¦ö%ö–B¢–bæ÷B¦ö"÷"¦ö"ævWB‚'7FGW2"’Ò&6ö×ÆWFVB#¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜M˜˜­Šı˜­˜‚‹­˜­‹ŠÍŠ}˜}‹"Š=˜‚Š}˜mŠ­˜}Š¢‹]˜MŠ}Šİ˜­Š’Š}˜M˜]˜}˜]Š’"¢f–FVõ÷F‚ÒF‚†¦ö%²'v÷&µöF—"%Ò’ò'f—7VÂÖÆW'Bæ×B ¢–bæ÷Bf–FVõ÷F‚æW†—7G2‚“¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜mŠ­˜}Š¢‹]˜MŠ}Šİ˜­Š’˜]˜M˜Š}˜M˜˜­Šı˜­˜‚"¢f÷&ÖGFVBÒ&Wæf÷&ÖGFVEö6öçFVçBç7G&—‚’÷"b'·&WçF—FÆWÕÆåÆç·&Wæ6öçFVçGÕÆåÆíŠ}˜MŠ]ŠÍ‹Š}ŠŠ}˜M˜]‹}˜M˜Šƒ¥Æç·&Wç&WV—&VEö7F–öçÒ ¢&6†—fUö–BÒ7G"†¦ö"ævWB‚&&6†—fUö–B"’÷"WV–BçWV–CB‚’¢6fUöæÖRÒ&Rç7V"‡"%µäÕ¦×£Ó•òÕÒ²"Â"Ò"Â&WçF—FÆR’ç7G&—‚"Ò"•³£cÒ÷"b&7–&W'VÇ6R×¶¦ö%ö–E³£…×Ò ¢v—F‚F%ö6öæâ‚’23 ¢2æW†V7WFR‚$”å4U%B”åDòf—7VÅöÆW'Eö&6†—fW2†–BÇF—FÆRÆ6öçFVçBÇ&WV—&VEö7F–öâÆf÷&ÖGFVEö6öçFVçB’dÅTU2‚W2ÂW2ÂW2ÂW2ÂW2’ôâ4ôädÄ”5B†–B’DòUDDR4UBF—FÆSÔU„4ÅTDTBçF—FÆRÆ6öçFVçCÔU„4ÅTDTBæ6öçFVçBÇ&WV—&VEö7F–öãÔU„4ÅTDTBç&WV—&VEö7F–öâÆf÷&ÖGFVEö6öçFVçCÔU„4ÅTDTBæf÷&ÖGFVEö6öçFVçB"Â†&6†—fUö–BÇ&WçF—FÆRÇ&Wæ6öçFVçBÇ&Wç&WV—&VEö7F–öâÆf÷&ÖGFVB’“²2æ6öÖÖ—B‚¢÷f—7VÅö¦ö%÷WFFR†¦ö%ö–BÂ&6†—fUö–CÖ&6†—fUö–BÂ6fVE÷Fõ÷6—FSÕG'VR¢G'“ ¢Fö¶VâÒövöövÆUöG&—fUö66W75÷Fö¶Vâ‚¢f–FVòÒövöövÆUöG&—fU÷WÆöB†b'·6fUöæÖWÒæ×B"Â'f–FVòö×B"Âf–FVõ÷F‚ç&VEö'—FW2‚’ÂFö¶Vâ¢FW‡Eöf–ÆRÒövöövÆUöG&—fU÷WÆöB†b'·6fUöæÖWÒÖ6öçFVçBçG‡B"Â'FW‡B÷Æ–ã²6†'6WCÕUDbÓ‚"Âf÷&ÖGFVBæVæ6öFR‚'WFbÓ‚"’ÂFö¶Vâ¢v—F‚F%ö6öæâ‚’23 ¢2æW†V7WFR‚%UDDRf—7VÅöÆW'Eö&6†—fW24UBG&—fU÷f–FVõö–CÒW2ÆG&—fU÷f–FVõ÷W&ÃÒW2ÆG&—fU÷FW‡Eö–CÒW2ÆG&—fU÷FW‡E÷W&ÃÒW2t„U$R–CÒW2"Â‡f–FVõ²&–B%ÒÇf–FVõ²'W&Â%ÒÇFW‡Eöf–ÆU²&–B%ÒÇFW‡Eöf–ÆU²'W&Â%ÒÆ&6†—fUö–B’“²2æ6öÖÖ—B‚¢÷f—7VÅö¦ö%÷WFFR†¦ö%ö–BÂ6fVE÷FõöG&—fSÕG'VRÂ&6†—fUö–CÖ&6†—fUö–BÂG&—fU÷f–FVõ÷W&Ã×f–FVõ²'W&Â%ÒÂG&—fU÷FW‡E÷W&Ã×FW‡Eöf–ÆU²'W&Â%Ò¢&WGW&â²'6fVB#¥G'VRÂ'6fVE÷Fõ÷6—FR#¥G'VRÂ'6fVE÷FõöG&—fR#¥G'VRÂ&&6†—fUö–B#¦&6†—fUö–BÂ&G&—fU÷f–FVõ÷W&Â#§f–FVõ²'W&Â%ÒÂ&G&—fU÷FW‡E÷W&Â#§FW‡Eöf–ÆU²'W&Â%×Ğ¢W†6WBW†6WF–öâ2W†3 ¢&WGW&â²'6fVB#¥G'VRÂ'6fVE÷Fõ÷6—FR#¥G'VRÂ'6fVE÷FõöG&—fR#¤fÇ6RÂ&&6†—fUö–B#¦&6†—fUö–BÂ'v&æ–ær#¦b-Š­˜RŠİ˜‹‚Š}˜M˜m‹R˜˜¢Š}˜M˜]˜˜-‹ˆÂ˜M˜=˜bŠ­‹‹‹Š}˜MŠİ˜‹‚˜˜¢vöövÆRG&—fS¢·7G"†W†2•³£ƒ×Ò'Ğ ¦FVb÷f–FVõ÷W&Â†÷WGWC¢ç’’Óâ7G# ¢–b—6–ç7Fæ6R†÷WGWBÂ7G"“ ¢&WGW&â÷WGW@¢–b—6–ç7Fæ6R†÷WGWBÂÆ—7B’æB÷WGWC ¢&WGW&â÷f–FVõ÷W&Â†÷WGWE³Ò¢–b—6–ç7Fæ6R†÷WGWBÂF–7B“ ¢f÷"¶W’–â‚'W&Â"Â'f–FVõ÷W&Â"Â'f–FVò"Â&÷WGWB"“ ¢–b÷WGWBævWB†¶W’“ ¢&WGW&â÷f–FVõ÷W&Â†÷WGWE¶¶W•Ò¢&—6RfÇVTW'&÷"‚$'—FW¢&WGW&æVBæòÆ–&ÆRf–FVòU$Â" ¦FVböf–Æ&ÆUö'—FW¥÷f–FVõöÖöFVÇ2†6Æ–VçC¢‡GG‚ä6Æ–VçB’ÓâÆ—7E·7G%Ó ¢W&ÂÒ&‡GG3¢òö’æ'—FW¢æ6öÒöÖöFVÇ2÷c"öÆ—7BöÖöFVÇ2 ¢†VFW'2Ò²$WF†÷&—¦F–öâ#¢÷2æVçf—&öå²$%•DU¥ô•ô´U’%×Ğ¢&W7öç6RÒ6Æ–VçBævWB‡W&ÂÂ†VFW'3Ö†VFW'2Â&×3×²'F6²#¢'FW‡B×Fò×f–FVò'Ò¢–b&W7öç6Rç7FGW5ö6öFRãÒS ¢&W7öç6RÒ6Æ–VçBævWB‡W&ÂÂ†VFW'3Ö†VFW'2Â&×3×²'F6²#¢'FW‡B×Fò×f–FVò'Ò¢–b&W7öç6Rç7FGW5ö6öFRãÒS ¢&W7öç6RÒ6Æ–VçBævWB‡W&ÂÂ†VFW'3Ö†VFW'2¢&W7öç6Rç&—6Uöf÷%÷7FGW2‚¢–ÆöBÒ&W7öç6Ræ§6öâ‚¢–b—6–ç7Fæ6R‡–ÆöBÂF–7B’æB–ÆöBævWB‚&W'&÷""“ ¢&—6RfÇVTW'&÷"‡7G"‡–ÆöE²&W'&÷"%Ò’¢&÷w2Ò–ÆöBævWB‚&÷WGWB"Â–ÆöBævWB‚&ÖöFVÇ2"ÂµÒ’’–b—6–ç7Fæ6R‡–ÆöBÂF–7B’VÇ6R–Æö@¢–b—6–ç7Fæ6R‡&÷w2ÂF–7B“ ¢&÷w2Ò&÷w2ævWB‚&ÖöFVÇ2"Â&÷w2ævWB‚&—FV×2"Â&÷w2ævWB‚&FF"ÂµÒ’’¢–bæ÷B—6–ç7Fæ6R‡&÷w2ÂÆ—7B“ ¢&÷w2ÒµĞ¢ÖöFVÇ2ÒµĞ¢f÷"&÷r–â&÷w3 ¢–bæ÷B—6–ç7Fæ6R‡&÷rÂF–7B“ ¢6öçF–çVP¢F6²Ò&÷rævWB‚'F6²"Â&÷rævWB‚'F6·2"Â""’¢F6·2ÒF6²–b—6–ç7Fæ6R‡F6²ÂÆ—7B’VÇ6R·F6µĞ¢ÖöFVÅö–BÒ&÷rævWB‚&ÖöFVÄ–B"Â&÷rævWB‚&–B"Â&÷rævWB‚&ÖöFVÂ"’’¢–bÖöFVÅö–BæB'FW‡B×Fò×f–FVò"–âF6·3 ¢ÖöFVÇ2æVæB‡7G"†ÖöFVÅö–B’ç7G&—‚’¢&WGW&âÖöFVÇ0 ¥Täd”Ä$ÄUô%•DU¥õd”DTõôÔôDTÅ2Ò²&Æ’×f–Æ"÷FW‡B×Fò×f–FVòÖ×2Óãv"'Ğ ¦FVbö'—FW¥÷f–FVõö6æF–FFW2†6Æ–VçC¢‡GG‚ä6Æ–VçB’ÓâÆ—7E·7G%Ó ¢6öæf–wW&VBÒ÷2ævWFVçb‚$%•DU¥õd”DTõôÔôDTÂ"Â""’ç7G&—‚¢ÖöFVÇ2Òöf–Æ&ÆUö'—FW¥÷f–FVõöÖöFVÇ2†6Æ–VçB¢6öæf–wW&VEö—5÷W6&ÆRÒ6öæf–wW&VBæB6öæf–wW&VBæ÷B–âTäd”Ä$ÄUô%•DU¥õd”DTõôÔôDTÅ0¢6æF–FFW2Ò…¶6öæf–wW&VEÒ–b6öæf–wW&VEö—5÷W6&ÆRVÇ6RµÒ’²ÖöFVÇ0¢Væ—VRÒµĞ¢f÷"ÖöFVÂ–â6æF–FFW3 ¢–bÖöFVÂæBÖöFVÂæ÷B–âTäd”Ä$ÄUô%•DU¥õd”DTõôÔôDTÅ2æBÖöFVÂæ÷B–âVæ—VS ¢Væ—VRæVæB†ÖöFVÂ¢–bVæ—VS ¢&WGW&âVæ—VP¢&—6RfÇVTW'&÷"€¢-˜M˜R˜­‹Š½‹'—FW¢‹˜M˜’Š=˜¢˜m˜]˜‹ŠÂFW‡B×Fò×f–FVò˜]Š­Š}ŠÒ˜M˜}‹ŠrŠ}˜M˜]˜Š­Š}ŠÒâ ¢-Š­Šİ˜-˜"˜]˜bŠ­˜˜‹˜m˜]Š}‹ŠÂŠ}˜M˜˜­Šı˜­˜‚˜Š}˜M‹‹]˜­Šò˜˜¢Šİ‹=Š}Š‚'—FW¢â ¢ ¦FVb÷'Vå÷f–FVõö¦ö"†¦ö%ö–C¢7G"Â&W¢æWw5f–FVõ&WVW7B“ ¢ÖöFVÂÒ÷2ævWFVçb‚$%•DU¥õd”DTõôÔôDTÂ"Â&WFöÖF–2"’ç7G&—‚’÷"&WFöÖF–2 ¢&ö×BÒbrrt7&VFR&VÖ—VÒfW'F–6Â“£bVF—F÷&–Â7–&W'6V7W&—G’f–FVòf÷"5”$U"TÅ4Rà¥F÷–3¢·&Wæ†VFÆ–æWĞ¤f7GVÂ6öçFW‡C¢·&Wç7VÖÖ'—Ğ¥F‡&VB6FVv÷'“¢·&WçF‡&VE÷G—WĞ¥f—7VÂF—&V7F–öã¢·&Wçf—7VÅö'&–Vb÷"&'7G&7BF–v—FÂ6V7W&—G’Vçf—&öæÖVçB'Ğ¥7G–ÆS¢·&Wç7G–ÆWÒâF&vWBGW&F–öã¢&÷†–ÖFVÇ’·&WæGW&F–öçÒ6V6öæG2à¥4TÔåD”2%TÄS¢6†÷rF†RffV7FVBFV6†æöÆöw’æB&W÷'FVB7F–öâ÷&—6²F—&V7FÇ’âWfW'’&öÖ–æVçBö&¦V7B×W7B&RG&6V&ÆRFòF†RF÷–2âæWfW"&WÆ6RFV6†æ–6ÂFW&Òv—F‚âVç&VÆFVB‡—6–6ÂÖWF†÷"â6ögGv&RF6†W2æBWFFW2×W7BÆöö²Æ–¶R6ögGv&RWFFR÷F6‚FWÆ÷–ÖVçBÂæ÷BÇVÖ&–ærÂvFW"ÆV·2Â&æFvW2Â6öç7G'V7F–öâÂ÷"†æBFööÇ2â6–×Æ–f–VBæöâ×&VF&ÆR–çFW&f6W2&RÆÆ÷vVBöæÇ’v†VâF†W’6Æ&–g’F†R7F÷'’à¥W6RF&²æg’æB&Æ6²v—F‚7–âæB7–&W"&ÇVR†–v†Æ–v‡G2âW6RVÆVvçB6–æVÖF–2Ö÷fVÖVçBÂ&VÆ—7F–2Æ–v‡F–ærÂæBöæR6ö†W&VçB66VæRâFòæ÷B6†÷r&VF&ÆRFW‡BÂÆWGFW'2ÂçVÖ&W'2Â6F–öç2ÂÆöv÷2ÂvFW&Ö&·2ÂVç&VÆFVBF6†&ö&G2Â÷"F—7F÷'FVB–çFW&f6W2âFòæ÷BFW–7Bw&†–2f–öÆVæ6R÷"æ–2ârrp¢G'“ ¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÖ‡GG‚åF–ÖV÷WBƒ3ãÂ6öææV7CÓ#ã’’26Æ–VçC ¢–ÆöBÒæöæP¢f–ÇW&W2ÒµĞ¢f÷"ÖöFVÂ–âö'—FW¥÷f–FVõö6æF–FFW2†6Æ–VçB“ ¢&W7öç6RÒ6Æ–VçBç÷7B€¢b&‡GG3¢òö’æ'—FW¢æ6öÒöÖöFVÇ2÷c"÷¶ÖöFVÇÒ"À¢†VFW'3×²$WF†÷&—¦F–öâ#¢÷2æVçf—&öå²$%•DU¥ô•ô´U’%ÒÂ$6öçFVçBÕG—R#¢&Æ–6F–öâö§6öâ'ÒÀ¢§6öã×²'FW‡B#¢&ö×GÒÀ¢¢–b&W7öç6Rç7FGW5ö6öFRÓÒCC ¢f–ÇW&W2æVæB†ÖöFVÂ¢6öçF–çVP¢&W7öç6Rç&—6Uöf÷%÷7FGW2‚¢–ÆöBÒ&W7öç6Ræ§6öâ‚¢'&V°¢–b–ÆöB—2æöæS ¢&—6RfÇVTW'&÷"€¢-˜m˜]Š}‹ŠÂ'—FW¢Š}˜MŠ­Š}˜M˜­Š’‹­˜­‹˜]Š­Š}ŠİŠ’ƒCB“¢"²"Â"æ¦ö–â†f–ÇW&W2¢²"âŠ}ŠíŠ­‹˜m˜]˜‹ŠÂFW‡B×Fò×f–FVò˜]Š­Š}Šİ˜½Šr˜]˜b˜M˜ŠİŠ’'—FW¢â ¢¢W'&÷"Ò–ÆöBævWB‚&W'&÷""’–b—6–ç7Fæ6R‡–ÆöBÂF–7B’VÇ6RæöæP¢–bW'&÷#¢&—6RfÇVTW'&÷"‡7G"†W'&÷"’¢÷WGWBÒ–ÆöBævWB‚&÷WGWB"Â–ÆöB’–b—6–ç7Fæ6R‡–ÆöBÂF–7B’VÇ6R–Æö@¢&W7VÇBÒ²'7FGW2#¢&6ö×ÆWFVB"Â'f–FVõ÷W&Â#¥÷f–FVõ÷W&Â†÷WGWB’Â&ÖöFVÂ#¦ÖöFVÂÂ&6ö×ÆWFVEöB#¦FFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’æ—6öf÷&ÖB‚—Ğ¢W†6WBW†6WF–öâ2W†3 ¢&W7VÇBÒ²'7FGW2#¢&f–ÆVB"Â&FWF–Â#§7G"†W†2•³£ÒÂ&ÖöFVÂ#¦ÖöFVÂÂ&6ö×ÆWFVEöB#¦FFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’æ—6öf÷&ÖB‚—Ğ¢v—F‚d”DTõô¤ô%5ôÄô4³ ¢d”DTõô¤ô%5¶¦ö%ö–EÒçWFFR‡&W7VÇB ¤ç÷7B‚"ö’öæWw2×f–FVò"Â7FGW5ö6öFSÓ#"¦FVb7&VFUöæWw5÷f–FVò‡&W¢æWw5f–FVõ&WVW7B“ ¢–bæ÷B÷2ævWFVçb‚$%•DU¥ô•ô´U’"“¢&—6R…EEW†6WF–öâƒCÂ$%•DU¥ô•ô´U’—2æ÷B6öæf–wW&VB"¢¦ö%ö–BÒ7G"‡WV–BçWV–CB‚’¢v—F‚d”DTõô¤ô%5ôÄô4³ ¢d”DTõô¤ô%5¶¦ö%ö–EÒÒ²&–B#¦¦ö%ö–BÂ'7FGW2#¢'&ö6W76–ær"Â&7&VFVEöB#¦FFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’æ—6öf÷&ÖB‚—Ğ¢F‡&VF–æråF‡&VB‡F&vWCÕ÷'Vå÷f–FVõö¦ö"Â&w3Ò†¦ö%ö–BÂ&W’ÂFVÖöãÕG'VR’ç7F'B‚¢&WGW&âd”DTõô¤ô%5¶¦ö%ö–EĞ ¤ævWB‚"ö’öæWw2×f–FVò÷¶¦ö%ö–GÒ"¦FVbæWw5÷f–FVõ÷7FGW2†¦ö%ö–C¢7G"“ ¢v—F‚d”DTõô¤ô%5ôÄô4³ ¢¦ö"Òd”DTõô¤ô%2ævWB†¦ö%ö–B¢–bæ÷B¦ö#¢&—6R…EEW†6WF–öâƒCBÂ%f–FVò¦ö"æ÷Bf÷VæB÷"F†R6W'f–6Rv2&W7F'FVB"¢&WGW&âF–7B†¦ö" ¤ævWB‚"ö’öæWw2×6÷W&6W2"¦FVbæWw5÷6÷W&6W2‚“¢&WGW&â²&6÷VçB#¦ÆVâ†ÆöEö7–&W%÷6÷W&6W2‚’’Â'6÷W&6W2#¦ÆöEö7–&W%÷6÷W&6W2‚—Ğ ¤ç÷7B‚"ö’÷6V&6‚ÖæWw2"¦FVb6V&6…öæWw2‡&W¢æWw56V&6…&WVW7B“ ¢–bæ÷B÷2ævWFVçb‚$õTä•ô•ô´U’"“¢&—6R…EEW†6WF–öâƒCÂ$õTä•ô•ô´U’—2æ÷B6öæf–wW&VB"¢6÷W&6W2ÒÆöEö7–&W%÷6÷W&6W2‚¢–bæ÷B6÷W&6W3¢&—6R…EEW†6WF–öâƒSÂ$7–&W'6V7W&—G’6÷W&6RÆ—7B—2æ÷Bf–Æ&ÆR"¢FöF’ÒFFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’ç7G&gF–ÖR‚"U’ÒVÒÒVB"¢6÷W&6UöÆ–æW2Ò%Æâ"æ¦ö–â†b"Ò·5²væÖRu×Ó¢·5²wW&Âu×Ò"f÷"2–â6÷W&6W2¢&ö×BÒbrru–÷R&RF†RÆ—fRæWw2F—66÷fW'’Væv–æRf÷"F†R&&–27–&W'6V7W&—G’V&Æ–6F–öâ-˜mŠ‹b‹=˜­Š‹Š}˜m˜¢Â5”$U"TÅ4R"à¥FöF’—2·FöF—Òâ6V&6‚F†RvV"f÷"F†RæWvW7BÖVæ–ævgVÂ7–&W'6V7W&—G’æWw2V&Æ—6†VBv—F†–âF†RÆ7B·&WæF—7ÒF—2à ¥5E$”5B4õU$4RôÄ”5“ ¥W6RôäÅ’F†R&÷fVB6÷W&6RÆ—7B&VÆ÷râFòæ÷B&WGW&ââ'F–6ÆRg&öÒç’÷F†W"FöÖ–ââ&VfW"&–Ö'’öff–6–ÂGf—6÷&–W2æBfVæF÷"&W6V&6‚v†VâF†W’&RF†R÷&–v–æÂ6÷W&6S²W6RW7F&Æ—6†VB7–&W'6V7W&—G’ÖVF–f÷"Ö¦÷"'&V¶–ær7F÷&–W2âW†6ÇVFRvVæW&–2WfW&w&VVâvW2ÂöÆB'F–6ÆW2ÂGWÆ–6FR7–æF–6F–öç2Â÷–æ–öâÖöæÇ’–V6W2ÂæB—FV×2v—F†÷WBV&Æ–6F–öâFFRà ¤$õdTB4õU$4U3 §·6÷W&6UöÆ–æW7Ğ ¥6VÆV7BWFò·&WæÆ–Ö—GÒF—7F–æ7BÂ†–v‚×fÇVR—FV×2&VÆWfçBFò7–&W'6V7W&—G’&öfW76–öæÇ2æBv÷fW&æÖVçBöVçFW'&—6R÷&væ—¦F–öç2â&–÷&—F—¦S¢7F—fRW‡Æö—FF–öâÂ6–væ–f–6çBgVÆæW&&–Æ—F–W2Â'&V6†W2ö–æ6–FVçG2Â&ç6ö×v&RÂF‡&VB6×–vç2Â–FVçF—G’ö6Æ÷VB÷6V7W&—G’ÆFf÷&Ò—77VW2Â7&—F–6Â–æg&7G'V7GW&RÂÖ¦÷"&VwVÆF÷'’ö÷W&F–öæÂ7–&W"FWfVÆ÷ÖVçG2à ¥&WGW&âôäÅ’fÆ–B¥4ôâv—F‚F†—2W†7B6†S §·²&—FV×2#¥··°¢'F—FÆUö"#¢&6öæ6—6R&&–2†VFÆ–æR"À¢'F—FÆUö÷&–v–æÂ#¢&÷&–v–æÂ'F–6ÆRöGf—6÷'’F—FÆR"À¢&FFR#¢&W†7BV&Æ–6F–öâFFRg&öÒ6÷W&6R"À¢&6öçFVçE÷G—R#¢-ŠíŠ‹÷"Š½‹­‹Š’Š=˜]˜m˜­Š’÷"Š­˜mŠ˜­˜rŠ=˜]˜m˜¢÷"Š}ŠíŠ­‹Š}˜"ıŠ­‹=‹˜­Š‚÷"ŠŠİŠ²Š=˜]˜m˜¢"À¢'6WfW&—G’#¢-Šİ‹ŠÂ÷"‹Š}˜M˜¢÷"˜]Š­˜‹=‹r÷"˜]˜mŠí˜‹b÷"V×G’–bF†R6÷W&6RFöW2æ÷B7FFR—B"À¢&7fR#¢&W†7B5dR–FVçF–f–W"‡2’÷"V×G’"À¢'6÷W&6R#¢&&÷fVB6÷W&6RæÖR"À¢'6÷W&6U÷W&Â#¢&&÷fVB6÷W&6R†öÖRöGf—6÷'’U$Â"À¢'W&Â#¢&F—&V7BU$ÂFòF†RW†7B'F–6ÆRöGf—6÷'’öââ&÷fVBFöÖ–â"À¢'7VÖÖ'•ö"#¢#"Ó2f7GVÂ&&–26VçFVæ6W2"À¢&æWw5÷FW‡Eö"#¢&6VÆbÖ6öçF–æVBf7GVÂ&&–2æWw2FW‡BöbÓ##v÷&G2&6VBöæÇ’öâF†R6÷W&6RÂ&W6W'f–ærFFRÂffV7FVB&öGV7B÷6V7F÷"ÂGF6²÷gVÆæW&&–Æ—G’FWF–Ç2æB–×7C²Fòæ÷B–çfVçB&V6öÖÖVæFF–öç2"À¢'&V6öÖÖVæFF–öç2#¥²&öæÇ’&V6öÖÖVæFF–öç2W‡Æ–6—FÇ’7FFVB'’F†R6÷W&6R%ÒÀ¢'&VÆWfæ6R#¢&öæR6†÷'B&&–26VçFVæ6RW‡Æ–æ–ærv‡’F†—2ÖGFW'2 §×Õ××Ğ¤Fòæ÷Bf'&–6FR5dRÂ6WfW&—G’ÂFFRÂ&V6öÖÖVæFF–öâÂ÷"U$Âârrp¢G'“ ¢6Æ–VçBÒ÷Vä’†•ö¶W“Ö÷2ævWFVçb‚$õTä•ô•ô´U’"’¢ÖöFVÂÒ÷2ævWFVçb‚$õTä•ôÔôDTÂ"Â&wBÓR"¢&W7öç6RÒ6Æ–VçBç&W7öç6W2æ7&VFR†ÖöFVÃÖÖöFVÂÂ–çWC×&ö×BÂFööÇ3Õ·²'G—R#¢'vV%÷6V&6‚'ÕÒÂ7F÷&SÔfÇ6R¢FFÒW‡G&7Eö§6öâ‡&W7öç6Ræ÷WGWE÷FW‡B¢fÆ–BÂ6VVâÒµÒÂ6WB‚¢f÷"—FVÒ–âFFævWB‚&—FV×2"ÂµÒ“ ¢W&ÂÒ7G"†—FVÒævWB‚'W&Â"Â""’’ç7G&—‚¢¶W’Ò‡W&ÂæÆ÷vW"‚’Â7G"†—FVÒævWB‚'F—FÆUö÷&–v–æÂ"Â—FVÒævWB‚'F—FÆUö""Â""’’’ç7G&—‚’æÆ÷vW"‚’¢–bæ÷BW&Â÷"æ÷BW&Åö—5ö&÷fVB‡W&Â’÷"¶W’–â6VVã¢6öçF–çVP¢6VVâæFB†¶W’¢fÆ–BæVæB†—FVÒ¢–bÆVâ‡fÆ–B’ãÒ&WæÆ–Ö—C¢'&V°¢&WGW&â²'6V&6†VEöB#¦FFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’æ—6öf÷&ÖB‚’Â&F—2#§&WæF—2Â'6÷W&6Uö6÷VçB#¦ÆVâ‡6÷W&6W2’Â&—FV×2#§fÆ–GĞ¢W†6WBW†6WF–öâ2S ¢&—6R…EEW†6WF–öâƒSÂb$æWw26V&6‚f–ÆVC¢¶WÒ" ¤ævWB‚"ö’ö&6†—fR"¦FVb&6†—fUöÆ—7B‚“ ¢v—F‚F%ö6öæâ‚’23¢&WGW&â2æW†V7WFR‚%4TÄT5B–BÇF÷–5ö–BÇF÷–2ÆFöÖ–âÇ÷7E÷G—RÇÆFf÷&ÒÆ6öçFVçBÆ7&VFVEöBÇWFFVEöBe$ôÒ÷7G2õ$DU"%’7&VFVEöBDU42"’æfWF6†ÆÂ‚ ¤ævWB‚"ö’ö&6†—fR÷W6VB×F÷–2Ö–G2"¦FVbW6VEö–G2‚“ ¢v—F‚F%ö6öæâ‚’23¢&WGW&â²'F÷–5ö–G2#¥·%²'F÷–5ö–B%Òf÷""–â2æW†V7WFR‚%4TÄT5BD•5D”ä5BF÷–5ö–Be$ôÒ÷7G2t„U$RF÷–5ö–B•2äõBåTÄÂ"’æfWF6†ÆÂ‚•×Ğ ¤ævWB‚"ö’ö&6†—fR÷·÷7Eö–GÒ"¦FVb&6†—fUövWB‡÷7Eö–C¢7G"“ ¢v—F‚F%ö6öæâ‚’23 ¢÷7BÒ2æW†V7WFR‚%4TÄT5B–BÇF÷–5ö–BÇF÷–2ÆFöÖ–âÇ÷7E÷G—RÇÆFf÷&ÒÆ6öçFVçBÆ7&VFVEöBÇWFFVEöBe$ôÒ÷7G2t„U$R–CÒW2"Â‡÷7Eö–BÂ’’æfWF6†öæR‚¢–bæ÷B÷7C¢&—6R…EEW†6WF–öâƒCBÂ-Š}˜M˜]˜m‹M˜‹‹­˜­‹˜]˜ŠÍ˜Šò"¢&WGW&â÷7@ ¤ç÷7B‚"ö’ö&6†—fR"¦FVb&6†—fU÷6fR‡¢&6†—fU÷7B“ ¢–BÒæ–B÷"7G"‡WV–BçWV–CB‚’“²æ÷rÒFFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2¢v—F‚F%ö6öæâ‚’23 ¢2æW†V7WFR‚$”å4U%B”åDò÷7G2†–BÇF÷–5ö–BÇF÷–2ÆFöÖ–âÇ÷7E÷G—RÇÆFf÷&ÒÆ6öçFVçBÆ7&VFVEöBÇWFFVEöB’dÅTU2‚W2ÂW2ÂW2ÂW2ÂW2ÂW2ÂW3£¦§6öæ"ÂW2ÂW2’ôâ4ôädÄ”5B†–B’DòUDDR4UB6öçFVçCÔU„4ÅTDTBæ6öçFVçBÇWFFVEöCÔU„4ÅTDTBçWFFVEöB"Â‡–BÇçF÷–5ö–BÇçF÷–2ÇæFöÖ–âÇç÷7E÷G—RÇçÆFf÷&ÒÆ§6öâæGV×2‡æ6öçFVçBÆVç7W&Uö66–“ÔfÇ6R’Ææ÷rÆæ÷r’“²2æ6öÖÖ—B‚¢&WGW&â²&–B#§–BÂ'6fVB#¥G'VWĞ ¤æFVÆWFR‚"ö’ö&6†—fR÷·÷7Eö–GÒ"¦FVb&6†—fUöFVÆWFR‡÷7Eö–C¢7G"“ ¢v—F‚F%ö6öæâ‚’23 ¢7W"Ò2æW†V7WFR‚$DTÄUDRe$ôÒ÷7G2t„U$R–CÒW2"Â‡÷7Eö–BÂ’“²2æ6öÖÖ—B‚“²&WGW&â²&FVÆWFVB#¦7W"ç&÷v6÷VçCãĞ ¦FVbFVÖõ÷–ÆöB‡&W“ ¢âÒ&Wç6Æ–FW2–b&Wç÷7E÷G—RÓÒ$6&÷W6VÂ"VÇ6R¢&WGW&â²&ÖöFR#¢&FVÖò"Â'F—FÆR#§&WçF÷–2Â&†öö²#§&WçF÷–2Â&6F–öâ#¢-˜]ŠİŠ­˜˜’Š­ŠÍ‹˜­Š˜¢â"Â'&V6öÖÖVæFF–öç2#¥µÒÂ&7F#¢-‹MŠ}‹˜2‹Š=˜­˜2â"Â&¶W—v÷&G2#¥²$u$2%ÒÂ&†6‡Fw2#¥²"4u$2%ÒÂ'6Æ–FW2#¥·²&çVÖ&W"#¦’³Â&†VFÆ–æR#§&WçF÷–2Â&&öG’#¢-˜m‹RŠ­ŠÍ‹˜­Š˜¢â'Òf÷"’–â&ævR†â•ÒÂ'6÷W&6W2#¥µ×Ğ ¤ç÷7B‚"ö’övVæW&FRÖ6öçFVçB"¦FVbvVæW&FUö6öçFVçB‡&W¢6öçFVçE&WVW7B“ ¢–bæ÷B÷2ævWFVçb‚$õTä•ô•ô´U’"“¢&WGW&âFVÖõ÷–ÆöB‡&W¢6Æ–VçBÒ÷Vä’†•ö¶W“Ö÷2ævWFVçb‚$õTä•ô•ô´U’"’“²ÖöFVÂÒ÷2ævWFVçb‚$õTä•ôÔôDTÂ"Â&wBÓR"¢&ö×BÒb$7&VFRV&Æ—6‚×&VG’&&–2·&Wç÷7E÷G—WÒ&÷WB·&WçF÷–7Òf÷"v÷fW&æÖVçBöVçFW'&—6R7–&W'6V7W&—G’&öfW76–öæÇ2âW†7FÇ’·&Wç6Æ–FW7Ò6Æ–FW2–b6&÷W6VÂâV6‚6Æ–FR†VFÆ–æRÕU5B&R6öæ6—6S¢Ö†–×VÒ’v÷&G2æBÖ†–×VÒ"f—7VÂÆ–æW2âV6‚6Æ–FR&öG’ÕU5B&RÖ†–×VÒ3"v÷&G2Âw&—GFVâ2öæR6ö×7B–FV7V—F&ÆRf÷"æòÖ÷&RF†âBf—7VÂÆ–æW2âWBW‡FVæFVBW‡ÆæF–öç2–âF†R6F–öâÂæWfW"–â6Æ–FR&öG’â&WGW&âôäÅ’¥4ôâv—F‚F—FÆRÆ†öö²Æ6F–öâÇ&V6öÖÖVæFF–öç2Æ7FÆ¶W—v÷&G2Æ†6‡Fw2Ç6Æ–FW2†çVÖ&W"Æ†VFÆ–æRÆ&öG’’Ç6÷W&6W2âæWfW"–çfVçB6—FF–öç2â†6‡Fw2æWfW"&VÆöær–â6Æ–FW2â ¢·rÒ²&ÖöFVÂ#¦ÖöFVÂÂ&–çWB#§&ö×BÂ'7F÷&R#¤fÇ6WĞ¢–b&WçW6U÷vV%÷6V&6ƒ¢·u²'FööÇ2%ÓÕ·²'G—R#¢'vV%÷6V&6‚'ÕĞ¢G'“ ¢BÒW‡G&7Eö§6öâ†6Æ–VçBç&W7öç6W2æ7&VFR‚¢¦·r’æ÷WGWE÷FW‡B¢f÷"6Æ–FR–âBævWB‚'6Æ–FW2"ÂµÒ“ ¢f÷"f–VÆBÂÆ–Ö—B–â‚‚&†VFÆ–æR"Â’’Â‚&&öG’"Â3"’“ ¢v÷&G2Ò7G"‡6Æ–FRævWB†f–VÆBÂ""’’ç7Æ—B‚¢6Æ–FU¶f–VÆEÒÒ""æ¦ö–â‡v÷&G5³¦Æ–Ö—EÒ’²‚.(
+b"–bÆVâ‡v÷&G2’âÆ–Ö—BVÇ6R""¢E²&ÖöFR%ÓÒ&÷Væ’#²&WGW&â@¢W†6WBW†6WF–öâ2S¢&—6R…EEW†6WF–öâƒSÂb$vVæW&F–öâf–ÆVC¢¶WÒ" ¤ç÷7B‚"ö’öW‡G&7BÖæWw2Öf–ÆR"¦7–æ2FVbW‡G&7EöæWw5öf–ÆR‡&WVW7C¢&WVW7B“ ¢""$W‡G&7BâÆW'BVçF—&VÇ’–âÖVÖ÷'“²F†RWÆöFVB'—FW2&RæWfW"W'6—7FVB÷"&6†—fVBâ"" ¢Ö…ö'—FW2Ò‚¢#B¢#@¢&rÒv—B&WVW7Bæ&öG’‚¢–bæ÷B&s¢&—6R…EEW†6WF–öâƒCÂ-Š}˜M˜]˜M˜˜Š}‹‹¢"¢–bÆVâ‡&r’âÖ…ö'—FW3¢&—6R…EEW†6WF–öâƒC2Â-ŠİŠÍ˜RŠ}˜M˜]˜M˜˜­Š­ŠÍŠ}˜‹"‚˜]˜­ŠÍŠ}ŠŠ}˜­Š¢"¢f–ÆVæÖRÒVçV÷FR‡&WVW7Bæ†VFW'2ævWB‚'‚ÖæWw2Öf–ÆVæÖR"Â&ÆW'BçG‡B"’¢7Vff—‚ÒF‚†f–ÆVæÖR’ç7Vff—‚æÆ÷vW"‚¢ÆÆ÷vVBÒ²"çFb"Â"æFö7‚"Â"çG‡B"Â"æÖB"Â"æ77b"Â"æ§6öâ'Ğ¢–b7Vff—‚æ÷B–âÆÆ÷vVC¢&—6R…EEW†6WF–öâƒCRÂ-˜m˜‹’Š}˜M˜]˜M˜‹­˜­‹˜]Šı‹˜˜RâŠ}‹=Š­ŠíŠı˜RDbŠ=˜‚Dô5‚Š=˜‚E…BŠ=˜‚ÔBŠ=˜‚55bŠ=˜‚¥4ôâ"¢G'“ ¢–b7Vff—‚ÓÒ"çFb# ¢–bæ÷B&rç7F'G7v—F‚†""UDb"“¢&—6RfÇVTW'&÷"‚-Š­˜˜-˜­‹’Db‹­˜­‹‹]Š}˜MŠÒ"¢g&öÒ—Fb–×÷'BFe&VFW ¢&VFW"ÒFe&VFW"†–òä'—FW4”ò‡&r’¢FW‡BÒ%Æâ"æ¦ö–â‚‡vRæW‡G&7E÷FW‡B‚’÷"""’f÷"vR–â&VFW"çvW2¢VÆ–b7Vff—‚ÓÒ"æFö7‚# ¢–bæ÷B¦—f–ÆRæ—5÷¦—f–ÆR†–òä'—FW4”ò‡&r’“¢&—6RfÇVTW'&÷"‚-Š­˜˜-˜­‹’Dô5‚‹­˜­‹‹]Š}˜MŠÒ"¢g&öÒFö7‚–×÷'BFö7VÖVç@¢Fö7VÖVçBÒFö7VÖVçB†–òä'—FW4”ò‡&r’¢FW‡BÒ%Æâ"æ¦ö–â‡çFW‡Bf÷"–âFö7VÖVçBç&w&‡2¢f÷"F&ÆR–âFö7VÖVçBçF&ÆW3 ¢FW‡B³Ò%Æâ"²%Æâ"æ¦ö–â‚"Â"æ¦ö–â†6VÆÂçFW‡Bf÷"6VÆÂ–â&÷ræ6VÆÇ2’f÷"&÷r–âF&ÆRç&÷w2¢VÇ6S ¢FW‡BÒ&ræFV6öFR‚'WFbÓ‚×6–r"¢W†6WBVæ–6öFTFV6öFTW'&÷# ¢&—6R…EEW†6WF–öâƒC#"Â-Š­‹‹‹˜-‹Š}ŠŠ’Š­‹˜]˜­‹"Š}˜M˜]˜M˜Š}˜M˜m‹]˜­‰²Š}Šİ˜‹˜rŠŠ­‹˜]˜­‹"UDbÓ‚"¢W†6WBW†6WF–öâ2W†3 ¢&—6R…EEW†6WF–öâƒC#"Âb-Š­‹‹‹Š}‹=Š­Ší‹Š}ŠÂŠ}˜M˜m‹R˜]˜bŠ}˜M˜]˜M˜¢¶W†7Ò"¢FW‡BÒ&Rç7V"‡"%Ç%Æãò"Â%Æâ"ÂFW‡B¢FW‡BÒ&Rç7V"‡"%²ÇEÒ²"Â""ÂFW‡B¢FW‡BÒ&Rç7V"‡"%Æç³2ÇÒ"Â%ÆåÆâ"ÂFW‡B’ç7G&—‚¢–bÆVâ‡FW‡B’Â¢&—6R…EEW†6WF–öâƒC#"Â-˜M˜R˜­˜ı‹Š½‹‹˜M˜’˜m‹R˜-Š}Š˜B˜M˜M˜-‹Š}ŠŠ‰²˜-Šò˜­˜=˜˜bŠ}˜M˜]˜M˜‹]˜‹Š’˜]˜]‹=˜ŠİŠ’‹m˜Šm˜­˜½Šr"¢FW‡BÒFW‡E³£#Ğ¢f—'7EöÆ–æRÒæW‡B‚†Æ–æRç7G&—‚’f÷"Æ–æR–âFW‡Bç7Æ—FÆ–æW2‚’–bÆVâ†Æ–æRç7G&—‚’’ãÒ2’Â""¢7VvvW7FVE÷F—FÆRÒf—'7EöÆ–æU³£3Ò–bÆVâ†f—'7EöÆ–æR’ÃÒ3VÇ6RF‚†f–ÆVæÖR’ç7FVÕ³£3Ğ¢&WGW&â²&f–ÆVæÖR#¥F‚†f–ÆVæÖR’ææÖRÂ'F—FÆR#§7VvvW7FVE÷F—FÆRÂ'FW‡B#§FW‡BÂ'7F÷&VB#¤fÇ6WĞ ¤ç÷7B‚"ö’÷'6RÖæWw2"¦FVb'6UöæWw2‡&W¢æWw5'6U&WVW7B“ ¢–bæ÷B÷2ævWFVçb‚$õTä•ô•ô´U’"“¢&—6R…EEW†6WF–öâƒCÂ$õTä•ô•ô´U’—2æ÷B6öæf–wW&VB"¢6Æ–VçBÒ÷Vä’†•ö¶W“Ö÷2ævWFVçb‚$õTä•ô•ô´U’"’“²ÖöFVÂÒ÷2ævWFVçb‚$õTä•ôÔôDTÂ"Â&wBÓR"¢&ö×BÒbrru–÷R&RF†RVF—F÷&–Â–çFVÆÆ–vVæ6RVæv–æRf÷"F†R&&–27–&W'6V7W&—G’V&Æ–6F–öâ-˜mŠ‹b‹=˜­Š‹Š}˜m˜¢Â5”$U"TÅ4R"à¥'6RôäÅ’7WÆ–VBf7G2âæWfW"–çfVçB÷"6–ÆVçFÇ’6÷'&V7B5dW2ÂFFW2Â6WfW&—G’ÂfVæF÷'2Â6÷W&6W2÷"&V6öÖÖVæFF–öç2à¤„TDÄ”äS¥Æç·&WçF—FÆWÕÆåÆå5DTBäUu3¥Æç·&WææWw7Ğ¤f–æBF†RW†7B÷&–v–æÂ'F–6ÆRöGf—6÷'’vRöâF†RæÖVB6÷W&6RvV'6—FRv†Vâ÷76–&ÆRâF†RFFRf–VÆBÕU5B&RF†RV&Æ–6F–öâFFRF—7Æ–VB'’F†B6÷W&6RvRÂæWfW"FöF’w2FFRÂF†RFFRöbæÇ—6—2Â÷"â–æfW'&VBFFRâ&WGW&ââV×G’FFR–bF†R÷&–v–æÂV&Æ–6F–öâFFR6ææ÷B&RfW&–f–VBà¥&WGW&âôäÅ’fÆ–B¥4ôâv—Fƒ¢†VFÆ–æRÂ6WfW&—G’Šİ‹ŠÂı‹Š}˜M˜¢ı˜]Š­˜‹=‹rı˜]˜mŠí˜‹bö÷"V×G’’ÂFFRÂFFU÷fW&–f–VB†&ööÆVâ’Â6÷W&6U÷W&Â†F—&V7BW†7B'F–6ÆRU$Â÷"V×G’’Â7fRÂ7VÖÖ'’ƒ"Ó26öæ6—6R&&–26VçFVæ6W2’Â&V6öÖÖVæFF–öç2†öæÇ’7WÆ–VB’Â6÷W&6RÂVçF—F–W2ÂF‡&VE÷G—RÂf—7VÅö'&–VbÂ6F–öâÂ†6‡Fw2à¤f÷"f—7VÅö'&–VbÂFW67&–&RôäRF—&V7BÂÆ—FW&ÂVF—F÷&–Â66VæRF†B–ÖÖVF–FVÇ’–FVçF–f–W2F†RffV7FVBFV6†æöÆöw’ÂfVæF÷"÷&öGV7B6FVv÷'’ÂæBF†R&W÷'FVB7F–öâ÷"&—6²â&VfW"&V6övæ—¦&ÆR&öGV7BvVöÖWG'’ÂFWf–6R÷6W'fW"6öçFW‡BÂF6‚÷WFFRö&¦V7G2Â6Æ÷VBöVÖ–Âö'&÷w6W"öÖö&–ÆR7VW2Â÷"–æ6–FVçB×7V6–f–2ö&¦V7G2F†B&RW‡Æ–6—FÇ’7W÷'FVB'’F†R7WÆ–VBæWw2âFòäõB&WÆ6RF†R7V&¦V7Bv—F‚Æö÷6RÖWF†÷"âf÷"W†×ÆRÂ6ögGv&RF6†W2×W7BÆöö²Æ–¶R6ögGv&RWFFR÷F6‚FWÆ÷–ÖVçBÂæWfW"ÇVÖ&–ærÂvFW"ÆV·2Â&æFvW2Â6öç7G'V7F–öâÂFööÇ2Â÷"‡—6–6Â&W—"âF†R'&–VbÕU5BäõB&WVW7B&VF&ÆRv÷&G2Â–çFW&f6RÆ&VÇ2Â6F–öç2ÂF–w&×2ÂfÆ÷v6†'G2ÂÆöv÷26öçF–æ–ærFW‡BÂÆWGFW'2÷"çVÖ&W'2â—BÖ’&WVW7B6–×Æ–f–VBæöâ×&VF&ÆR–çFW&f6R6†W2öæÇ’v†VâF†R7F÷'’—27V6–f–6ÆÇ’&÷WB6ögGv&RÂWFFW2Â–FVçF—G’Â6Æ÷VBÂVÖ–ÂÂ'&÷w6W'2Â÷"Öö&–ÆR2à¤6F–öâ×W7B&RöæRöÆ—6†VBÂ6VÆbÖ6öçF–æVB&&–2÷7B&VG’Fò7FR–çFò$õD‚Æ–æ¶VD–âæB–ç7Fw&ÒâW6RCÓ#cv÷&G2æB&VÇ’öæÇ’öâ7WÆ–VBf7G2à¤f÷&ÖBF†R6F–öâ2&VF&ÆR6ö6–Â6÷’W6–ærÆ–âFW‡BæB–çFVçF–öæÂÆ–æR'&V·3 £â÷Vâv—F‚7G&öærÂf7GVÂ†öö²÷"†VFÆ–æR†æò6Æ–6¶&—B’à£"âFB6†÷'B&w&‚W‡Æ–æ–ærv†B†VæVBæBv‡’—BÖGFW'2à£2â'&V²¶W’f7G2–çFò"ÓR6†÷'BÆ–æW2&Vv–ææ–ærv—F‚	ùK’v†VâF†R7WÆ–VBÖFW&–Â7W÷'G2F—7F–æ7Bf7G27V6‚2F†RffV7FVB&öGV7B÷6V7F÷"ÂgVÆæW&&–Æ—G’÷"GF6²ÖWF†öBÂ–×7BÂ6WfW&—G’Â5dRÂ÷"FFRâæWfW"7&VFR'VÆÆWBÖW&VÇ’Fòf–ÆÂF†R7G'V7GW&Rà£Bâ–b&V6öÖÖVæFF–öç2vW&R7WÆ–VBÂ–çG&öGV6RF†VÒv—F‚-˜]ŠrŠ}˜M‹˜¢˜­ŠÍŠ‚˜‹˜M˜}‰ò"æBÆ—7BV6‚7F–öâöâ6W&FRÆ–æR&Vv–ææ–ærv—F‚)ÈRâ–bæöæRvW&R7WÆ–VBÂöÖ—BF†—26V7F–öâ6ö×ÆWFVÇ’à£RâFB-Š}˜MŠí˜MŠ}‹]Š“¢"föÆÆ÷vVB'’öæR6öæ6—6R&7F–6ÂF¶Vv’&6VBöæÇ’öâF†R7WÆ–VBf7G2à£bâVæBv—F‚öæRæGW&ÂVævvVÖVçBVW7F–öâ÷"6ÆÂFò7F–öâÂF†VâÆ6R7–&W'VÇ6Uö"öâ—G2÷vâÆ–æRà¤¶VW&w&‡26†÷'BÂ&öfW76–öæÂÂF—&V7BÂ%DÂÖg&–VæFÇ’ÂæBV7’Fò66âöâÖö&–ÆRâFòæ÷BW6RÖ&¶F÷vâ†VF–æw2Â7FW&—6·2ÂçVÖ&W&VBÆ—7G2ÂW†6W76—fRVÖö¦—2Â÷"†6‡Fw2–ç6–FR6F–öâà¤†6‡Fw2×W7B&R¥4ôâ'&’öbbÓ6öæ6—6R&&–2÷"VævÆ—6‚†6‡Fw2&VÆWfçBFòF†R7WÆ–VB7F÷'’ÂV6‚&Vv–ææ–ærv—F‚2âÇv—2–æ6ÇVFR=˜mŠ‹eı‹=˜­Š‹Š}˜m˜¢æB=Š}˜MŠ=˜]˜eıŠ}˜M‹=˜­Š‹Š}˜m˜¢ârrp¢G'“ ¢'6VBÒW‡G&7Eö§6öâ†6Æ–VçBç&W7öç6W2æ7&VFR†ÖöFVÃÖÖöFVÂÂ–çWC×&ö×BÂFööÇ3Õ·²'G—R#¢'vV%÷6V&6‚'ÕÒÂ7F÷&SÔfÇ6R’æ÷WGWE÷FW‡B¢6÷W&6U÷W&ÂÒ7G"‡'6VBævWB‚'6÷W&6U÷W&Â"Â""’’ç7G&—‚¢7FVE÷W&Ç2Ò&Ræf–æFÆÂ‡"v‡GG3ó¢òõµåÇ3Ãâ%ÂuÒ²rÂ&WææWw2¢6æF–FFU÷W&Ç2Ò7FVE÷W&Ç2²…·6÷W&6U÷W&ÅÒ–b6÷W&6U÷W&ÂVÇ6RµÒ¢fW&–f–VEöFFRÂfW&–f–VE÷W&ÂÒ""Â" ¢f÷"6æF–FFR–â6æF–FFU÷W&Ç3 ¢6æF–FFRÒ6æF–FFRç'7G&—‚"âÍˆÍ‰³³¢ò•×Ò"¢–bæ÷BW&Åö—5ö&÷fVB†6æF–FFR“ ¢6öçF–çVP¢fW&–f–VEöFFRÒ6÷W&6U÷V&Æ–6F–öåöFFR†6æF–FFR¢–bfW&–f–VEöFFS ¢fW&–f–VE÷W&ÂÒ6æF–FFP¢'&V°¢–bfW&–f–VEöFFS ¢'6VE²&FFR%ÒÒfW&–f–VEöFFP¢'6VE²&FFU÷fW&–f–VB%ÒÒG'VP¢'6VE²'6÷W&6U÷W&Â%ÒÒfW&–f–VE÷W&À¢VÇ6S ¢'6VE²&FFU÷fW&–f–VB%ÒÒ&ööÂ‡'6VBævWB‚&FFU÷fW&–f–VB"’æB6÷W&6U÷W&ÂæBW&Åö—5ö&÷fVB‡6÷W&6U÷W&Â’¢–bæ÷B'6VE²&FFU÷fW&–f–VB%Ó ¢'6VE²&FFR%ÒÒ" ¢&WGW&â'6V@¢W†6WBW†6WF–öâ2S¢&—6R…EEW†6WF–öâƒSÂb$æWw2'6–ærf–ÆVC¢¶WÒ" ¤$$”5ôÔôåD…2Ò°¢¢-˜­˜mŠ}˜­‹"Â#¢-˜Š‹Š}˜­‹"Â3¢-˜]Š}‹‹2"ÂC¢-Š=Š‹˜­˜B"ÂS¢-˜]Š}˜­˜‚"Âc¢-˜­˜˜m˜­˜‚"À¢s¢-˜­˜˜M˜­˜‚"Âƒ¢-Š=‹­‹=‹}‹2"Â“¢-‹=ŠŠ­˜]Š‹"Â¢-Š=˜=Š­˜Š‹"Â¢-˜m˜˜˜]Š‹"Â#¢-Šı˜­‹=˜]Š‹"À§Ğ ¦FVböf÷&ÖE÷6÷W&6UöFFR‡fÇVS¢7G"’Óâ7G# ¢&rÒ‡FÖÂçVæW66R‡7G"‡fÇVR÷"""’’ç7G&—‚¢–bæ÷B&s ¢&WGW&â" ¢—6òÒ&rç&WÆ6R‚%¢"Â"³£"¢G'“ ¢GBÒFFWF–ÖRæg&öÖ—6öf÷&ÖB†—6ò¢&WGW&âb'¶GBæF—Ò´$$”5ôÔôåD…5¶GBæÖöçF…×Ò¶GBç–V'Ò ¢W†6WBfÇVTW'&÷# ¢70¢ÖF6‚Ò&Rç6V&6‚‡"uÆ"ƒ#ÆG³'Ò’Ò…ÆG³Ã'Ò’Ò…ÆG³Ã'Ò•Æ"rÂ&r¢–bÖF6ƒ ¢–V"ÂÖöçF‚ÂF’ÒÖ†–çBÂÖF6‚æw&÷W2‚’¢–bÖöçF‚–â$$”5ôÔôåD…3 ¢&WGW&âb'¶F—Ò´$$”5ôÔôåD…5¶ÖöçF…×Ò·–V'Ò ¢&WGW&â&u³£ƒĞ ¦FVb6÷W&6U÷V&Æ–6F–öåöFFR‡W&Ã¢7G"’Óâ7G# ¢G'“ ¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÖ‡GG‚åF–ÖV÷WBƒ#ãÂ6öææV7CÓã’ÂföÆÆ÷u÷&VF—&V7G3ÕG'VR’26Æ–VçC ¢&W7öç6RÒ6Æ–VçBævWB‡W&ÂÂ†VFW'3×²%W6W"ÔvVçB#¢$Ö÷¦–ÆÆóRã7–&W%VÇ6T&÷Bóã'Ò¢&W7öç6Rç&—6Uöf÷%÷7FGW2‚¢vRÒ&W7öç6RçFW‡E³£%óóĞ¢GFW&ç2Ò°¢"sÆÖWFµãåÒ²ƒó§&÷W'G—ÆæÖR“Õ²%ÂuÖ'F–6ÆS§V&Æ—6†VE÷F–ÖU²%ÂuÕµãåÒ¶6öçFVçCÕ²%ÂuÒ…µâ%ÂuÒ²’rÀ¢"sÆÖWFµãåÒ¶6öçFVçCÕ²%ÂuÒ…µâ%ÂuÒ²•²%ÂuÕµãåÒ²ƒó§&÷W'G—ÆæÖR“Õ²%ÂuÖ'F–6ÆS§V&Æ—6†VE÷F–ÖU²%ÂuÒrÀ¢"sÆÖWFµãåÒ²ƒó§&÷W'G—ÆæÖR“Õ²%ÂuÒƒó¦FFUV&Æ—6†VGÆFFWÇV&FFWÇV&Æ—6‚ÖFFR•²%ÂuÕµãåÒ¶6öçFVçCÕ²%ÂuÒ…µâ%ÂuÒ²’rÀ¢"u²%ÂuÖFFUV&Æ—6†VE²%ÂuÕÇ2£¥Ç2¥²%ÂuÒ…µâ%ÂuÒ²’rÀ¢Ğ¢f÷"GFW&â–âGFW&ç3 ¢ÖF6‚Ò&Rç6V&6‚‡GFW&âÂvRÂ&Rä”täõ$T44R¢–bÖF6ƒ ¢&WGW&âöf÷&ÖE÷6÷W&6UöFFR†ÖF6‚æw&÷Wƒ’¢W†6WBW†6WF–öã ¢&WGW&â" ¢&WGW&â"  ¦FVbf—7VÅ÷&ö×B‡&W¢–ÖvU&WVW7B“ ¢–b&Wçf—7VÅ÷7G–ÆRÓÒ$7–&W"VÇ6R# ¢7F÷'’Òb'·&WçF—FÆWÒ·&Wæ&öG—Ò·&Wçf—7VÅöF—&V7F–öçÒ"æÆ÷vW"‚¢¦ööÕö6öçG&7BÒ" ¢–b'¦ööÒ"–â7F÷'’÷"-‹-˜˜˜R"–â7F÷'“ ¢¦ööÕö6öçG&7BÒrruÆäÔäDDõ%’¤ôôÒääõDD”ôâd•5TÂ4ôåE$5C¢6†÷r&V6övæ—¦&ÆRÖöFW&âf–FVòÖÖVWF–ær66VæRv—F‚6WfW&Â'F–6—çBF–ÆW3²6†&VB×67&VVâ6çf3²6ÆV&Ç’f—6–&ÆRææ÷FF–öâVâöG&v–ær7G&ö¶Rö7W'6÷"7F–æröâF†B6†&VB6çf3²æBâVæWF†÷&—¦VBÖ6öçG&öÂF‚7&VF–ærg&öÒF†Rææ÷FFVB6†&VB67&VVâF÷v&BGvò÷"Ö÷&R'F–6—çBÆF÷2öFWf–6W2âW6R&VBöæÇ’f÷"F†R†÷7F–ÆR6öçG&öÂF‚æB7–âö&ÇVRf÷"F†RÆVv—F–ÖFRÖVWF–ærâvVæW&–2ÆF÷ÂvVæW&–2'F–6—çBw&–BÂÆ&vR'&÷rÂ—6öÆFVBW6W"–6öâÂWFFRv–æF÷rÂF÷væÆöB67&VVâÂ÷"6–ævÆRÖFWf–6Rv&æ–ær—2äõB7Vff–6–VçBâFòæ÷BvVæW&FR&VF&ÆR¦ööÒFW‡B÷"Æöv÷3²6öÖ×Væ–6FRF†RÆFf÷&ÒF‡&÷Vv‚—G2fÖ–Æ–"&ÇVRf–FVòÖÖVWF–ærf—7VÂÆæwVvRæBÖVWF–ærÆ–÷WBåÆârrp¢f&–çEö6öçG&7G2Ò°¢¢%d$”åB(	BD•$T5B4U4Â44TäS¢W6RöæRFöÖ–æçBfö6Âö–çBæB6ÆV"f—7VÂF‚g&öÒF†RgVÆæW&&ÆRFV6†æöÆöw’ö7F–öâFòF†R–×7Bâ"À¢#¢%d$”åB"(	B5Ä•BTD•Dõ$”Â44TäS¢W6R6ÆV&Ç’F—f–FVB'WB6–æVÖF–26÷W&6R×fW'7W2Ö–×7B÷"&Vf÷&R×fW'7W2ÖgFW"6ö×÷6—F–öâÂ6öææV7FVB'’F†RW†7BGF6²÷&—6²ÖV6†æ—6Òâ"À¢3¢%d$”åB2(	BTåDU%$•4R4ôåDU…B44TäS¢Æ6RF†RW†7BFV6†æöÆöw’æBÖV6†æ—6Ò–ç6–FR&VÆ—7F–2VçFW'&—6RVçf—&öæÖVçBv—F‚V÷ÆRöFWf–6W2v†W&R&VÆWfçBÂv†–ÆR¶VW–ærF†RFV6†æ–6Â6W6RæB–×7BVæÖ—7F¶&ÆRâ"À¢Ğ¢f&–çEö6öçG&7BÒf&–çEö6öçG&7G5·&Wçf&–çEö–æFW…Ğ¢&WGW&âbrrt7&VFRôäÅ’F†Rf—7VÂ&6¶w&÷VæB'Gv÷&²f÷"&VÖ—VÒ7–&W'6V7W&—G’æWw2÷7Bâ&Vf÷&R6ö×÷6–ærÂ–FVçF–g’F†RW†7B7V&¦V7BÂffV7FVBFV6†æöÆöw’÷fVæF÷"6FVv÷'’ÂWfVçBÂæB&—6²ÖV6†æ—6Òg&öÒF†R7WÆ–VBF—FÆRÂ6öçFW‡BÂæBf—7VÂF—&V7F–öâà¤dõ$ÔC¢fW'F–6Â–ç7Fw&ÒC£R÷'G&—Bà§·f&–çEö6öçG&7GĞ¥F†—26ö×÷6—F–öâ×W7B&R7V'7FçF–ÆÇ’F–ffW&VçBg&öÒF†R÷F†W"f&–çG2v†–ÆR&W6W'f–ærF†R6ÖRf7GVÂ7F÷'’æB7–&W"VÇ6R–FVçF—G’à¤%$äBd•5TÂ5•5DTÓ¢FVW&Æ6²öF&²æg’3S#"Â7–&W"&ÇVR3ƒDdbÂ7–â3C3râ&VBöæÇ’v†VâF†R7WÆ–VB&—6²—2†–v‚ö7&—F–6Ââ7V'FÆR6—&7V—BGFW&ç2Â&W7G&–æVBF–v—FÂw&–BÂ6ögB&ÇVRö7–âFÖ÷7†W&–2vÆ÷râ&VÖ—VÒVçFW'&—6R7–&W'6V7W&—G’ÖVF–V&Æ–6F–öâVÆ—G’Â6÷†—7F–6FVBæBÖ–æ–ÖÂÂæWfW"vÖ–ærÖÆ–¶Rà¥4TÔåD”245U$5’•2D„R„”t„U5B$”õ$•E“¢&W&W6VçBF†RæWw27V&¦V7BF—&V7FÇ’æBÆ—FW&ÆÇ’âWfW'’&öÖ–æVçBö&¦V7B×W7B&RG&6V&ÆRFòF†R7WÆ–VB7F÷'’â6†÷rF†RffV7FVBFV6†æöÆöw’æBF†R&W÷'FVB7F–öâ÷&—6²–âöæR6ö†W&VçB66VæRâFòæ÷B–çfVçBâVç&VÆFVBf—7VÂÖWF†÷"â–bF†R7F÷'’—2&÷WB6ögGv&RWFFW2÷"6V7W&—G’F6†W2Â6†÷râWFFR÷F6‚FWÆ÷–ÖVçBVçf—&öæÖVçBÂ&V6övæ—¦&ÆR6ögGv&R÷ÆFf÷&ÒvVöÖWG'’Â&–÷&—F—¦VB7&—F–6ÂWFFRö&¦V7G2Â&÷FV7FVBVçFW'&—6RFWf–6W2÷"6W'fW'2ÂæB6V7W&—G’7FGW27VW2âæWfW"G&ç6ÆFR'F6‚"Â&ÆV²"Â&'Vr"Â&6Æ÷VB"Â'f—'W2"Â'v÷&Ò"Â&vFWv’"Â÷"6–Ö–Æ"FV6†æ–6ÂFW&×2–çFòVç&VÆFVB‡—6–6Âö&¦V7G2VæÆW72F†R7WÆ–VB7F÷'’—27GVÆÇ’&÷WBF†÷6R‡—6–6Âö&¦V7G2à¥5E$”5B4ôÕõ4•D”ôã¢'V–ÆB6–æVÖF–2W‡ÆæF÷'’VF—F÷&–Â66VæRÂæ÷BvVæW&–27Fö6²×7G–ÆR7–&W'6V7W&—G’–ÖvRâF†R66VæR×W7Bf—7VÆÇ’FVÆÂF†R–æ6–FVçB–âöæRvÆæ6S¢ffV7FVBÆFf÷&Òö6öçFW‡BÓâgVÆæW&&ÆRfVGW&R÷"7F–öâÓâf—6–&ÆR–×7BöâF†RffV7FVBFWf–6W2âW6RFWF‚Â6ÆV"fö6Â†–W&&6‡’Â&VÆ—7F–2VçFW'&—6RV÷ÆRöFWf–6W2v†W&R&VÆWfçBÂæB&V6—6R7–â×fW'7W2×&VBf—7VÂ6W6Æ—G’â6öæ6VçG&FRF†RW‡ÆæF÷'’7F–öâ–âF†R6VçFW"öÆ÷vW"SRÓcRâ&W6W'fRvVçV–æVÇ’V×G’ÂF&²ÂÆ÷rÖFWF–ÂFW‡B×6fRVF—F÷&–ÂæVÂ7&÷72F†RWW"3RÓCS²æòf6W2Â'&–v‡Bö&¦V7G2Â–çFW&f6RæVÇ2ÂGF6²F‡2Â÷"–×÷'FçBFWF–Ç2Ö’VçFW"F†BæVÂâ¶VWFF—F–öæÂ6fR76RBF†RF÷×&–v‡Bf÷"F†R7–&W"VÇ6RÆövòà¤%4ôÅUDRäòÕDU…B%TÄS¢¤U$ò&VF&ÆR&&–2÷"VævÆ—6‚Âv÷&G2ÂÆWGFW'2ÂçVÖ&W'2Â5dW2Â&öGV7BæÖW2ÂT’Æ&VÇ2Â6F–öç2Â†VFÆ–æW2Â†6‡Fw2ÂvFW&Ö&·2Â6–væGW&W2Â'&æBæÖW2Â6WVFò×FW‡B÷"G—öw&†–2ÆövòÖ&·2à¥6–×Æ–f–VBæöâ×&VF&ÆR–çFW&f6RæVÇ2ÂWFFR&öw&W726†W2Â&öGV7BvVöÖWG'’ÂF6‚F–ÆW2ÂFWf–6R67&VVç2ÂæB6V7W&—G’×7FGW26&G2&RÆÆ÷vVBöæÇ’v†VâF†W’F—&V7FÇ’6Æ&–g’F†R7WÆ–VB7F÷'’âF†W’×W7B6öçF–âæòFW‡B÷"6WVFò×FW‡Bà¤DòäõB5$TDRfÆ÷v6†'G2ÂvVæW&–2F6†&ö&G2Vç&VÆFVBFòF†R7F÷'’Â'&÷w6W"F—&V7F÷'’Æ—7G2ÂFVç6RF&ÆW2Â†6¶W"†ööF–W2ÂÖ6·2Â6·VÆÇ2ÂÖG&—‚6öFRÂ&æFöÒ&–æ'’7G&V×2ÂÇVÖ&–ærÂvFW"ÆV·2Â&æFvW2Â6öç7G'V7F–öâFööÇ2Â&W—"FööÇ2Â÷"6ÇWGFW"VæÆW72W‡Æ–6—FÇ’&WV—&VB'’F†Rf7GVÂ7F÷'’à¤D•$T5Bd•5TÂ%$”Tc¢·&Wçf—7VÅöF—&V7F–öçĞ¤äUu2D•DÄS¢·&WçF—FÆWĞ¤d5ETÂ4ôåDU…C¢·&Wæ&öG—Ğ§·¦ööÕö6öçG&7GĞ¤f–æÂ6VÆbÖ6†V6²&Vf÷&R&VæFW&–æs¢ƒ’v÷VÆBf–WvW"–FVçF–g’F†RFV6†æöÆöw’æBWfVçBv—F†÷WB&VF–ærF†R†VFÆ–æRÂƒ"’6âF†Rf–WvW"föÆÆ÷rF†RGF6²÷"&—6²ÖV6†æ—6Òg&öÒ—G2÷&–v–âFò—G2–×7BÂæBƒ2’FöW2F†R–ÖvR†fR6ÆV"VF—F÷&–Â†–W&&6‡’&F†W"F†âÖW&VÇ’6öçF–æ–ærF†R&–v‡Bö&¦V7G3ò–bç’ç7vW"—2æòÂ&Wf—6R&Vf÷&R&VæFW&–ærârrp¢6öÖÖöâÒb$'Gv÷&²öæÇ’ÂC£R÷'G&—Bâ6öæ6WC¢·&WçF—FÆWÒâ6öçFW‡C¢·&Wæ&öG—Òâ%4ôÅUDS¢¦W&ò&VF&ÆRFW‡BÂÆWGFW'2ÂçVÖ&W'2ÂÆ&VÇ2Â†VF–æw2Âg&ÖWv÷&²æÖW2Â–çFW&f6R6÷’Â†6‡Fw2ÂvFW&Ö&·2÷"6WVFò×FW‡BâFòæ÷B7&VFRÆ&VÆVB–æföw&†–2Â÷7FW"Â6Æ–FRÂF–w&Òv—F‚6F–öç2Â÷"FW‡BÖ&V&–ærT’â&W6W'fRF†RF÷#‚R26ÆVâÆ÷rÖFWF–ÂG—öw&‡’×6fR¦öæRæBF†R&÷GFöÒ#"R2æ÷F†W"6ÆVâÆ÷rÖFWF–ÂG—öw&‡’×6fR¦öæRâÆ6RF†R6–ævÆRÖ–âf—7VÂ7V&¦V7BöæÇ’–âF†R6VçG&ÂSRÂgVÆÇ’f—6–&ÆRæBæ÷B7&÷VBâ·&Wçf—7VÅöF—&V7F–öçÒ ¢–b&WæFöÖ–âç7G&—‚’çWW"‚’ÓÒ$u$2#¢7G–ÆRÒ%&VÖ—VÒÆ–v‡Bv÷fW&æÖVçBöVçFW'&—6Ru$2VF—F÷&–Â–ÆÇW7G&F–öã²v†—FRö6ööÂÖw&“²æg’÷&÷–Â&ÇVS²&W7G&–æVBw&VVâö÷&ævR÷&VB7FGW266VçG3²öæR7G&öær6VçG&Â7–Ö&öÆ–266VæRW6–æröÆ—6†VBVçFW'&—6RfV7F÷"÷6VÖ’Ó4Bö&¦V7G3²æò–çFW&æÂÆ&VÇ2Âæò×VÇF’×æVÂ–æföw&†–2Âæò&WVFVBÖ–æ’F–w&×2ÂvVæW&÷W2v†—FW76RÂæò†6¶W"6Æ–6Œ:—2â ¢VÆ–b&Wçf—7VÅ÷7G–ÆRÓÒ$W†V7WF—fRÖ–æ–ÖÂ#¢7G–ÆRÒ$W†V7WF—fRÖ–æ–ÖÂ'Gv÷&²Âv†—FR&6¶w&÷VæBÂæg’ö&ÇVRÂ7G&öær6VçG&ÂÖWF†÷"Âv†—FW76Râ ¢VÇ6S¢7G–ÆRÒ%7G'V7GW&VB&öfW76–öæÂ–æföw&†–2'Gv÷&²ÂÆ–v‡B&6¶w&÷VæBÂ6VçG&Â6öæ6WBæB&W7G&–æVB7W÷'F–ærf—7VÇ2â ¢&WGW&â7G–ÆR²%Æâ"²6öÖÖöà ¦FVb&Wf–Wuö'Gv÷&²†6Æ–VçC¢÷Vä’Â&W¢–ÖvU&WVW7BÂ–ÖvUö#cC¢7G"“ ¢&Wf–Wu÷&ö×BÒbrru–÷R&RF†Rf—7VÂVÆ—G’Ö6öçG&öÂ&Wf–WvW"f÷"F†R&&–27–&W'6V7W&—G’V&Æ–6F–öâ-˜mŠ‹b‹=˜­Š‹Š}˜m˜¢Â5”$U"TÅ4R"à¤WfÇVFRF†R7WÆ–VBvVæW&FVB'Gv÷&²v–ç7BF†Rf7GVÂæWw26öçFW‡Bâ&Wf–WrF†R”ÔtR—G6VÆbÂæ÷BÖW&VÇ’F†R&ö×Bà¥W6RôäÅ’F†R7WÆ–VBæWw2F—FÆRÂf7GVÂ6öçFW‡BÂæB&WV—&VBf—7VÂF—&V7F–öââæWfW"&WV—&Râö&¦V7BÂ67&VVâÂfVGW&RÂWFFRv–æF÷rÂF÷væÆöBÂF6‚ÂfVæF÷"Â÷"GF6²7FWF†B—2æ÷B7W÷'FVB'’F†—27V6–f–27F÷'’âFòæ÷B6''’&WV—&VÖVçG2g&öÒæ÷F†W"7–&W'6V7W&—G’7F÷'’à ¤äUu2D•DÄS¢·&WçF—FÆWĞ¤d5ETÂ4ôåDU…C¢·&Wæ&öG—Ğ¥$UT•$TBd•5TÂD•$T5D”ôã¢·&Wçf—7VÅöF—&V7F–öçĞ ¥66÷&RF†W6R7&—FW&– £âF†RffV7FVBFV6†æöÆöw’÷fVæF÷"÷&öGV7B6FVv÷'’—2–ÖÖVF–FVÇ’–FVçF–f–&ÆRv—F†÷WB†VFÆ–æRFW‡Bà£"âF†R&W÷'FVBWfVçB÷"GF6²ÖV6†æ—6Ò—2f—7VÆÇ’6ÆV"æBFV6†æ–6ÆÇ’&VÆWfçBà£2âWfW'’&öÖ–æVçBö&¦V7B—2G&6V&ÆRFòF†R7WÆ–VB7F÷'“²F†W&R&RæòÆö÷6R÷"Ö—6ÆVF–ærÖWF†÷'2à£BâF†R66VæR†2&VÖ—VÒ7–&W"VÇ6RVF—F÷&–ÂVÆ—G“¢F&²æg’Â7–â÷FVÂÂ&W7G&–æVB&—6²&VBÂ6ÆVâæB&öfW76–öæÂà£RâF†RWW"3RÓCR&VÖ–ç2W6&ÆRf÷"&&–2†VFÆ–æRæBÖWFFFÂæBF†RF÷×&–v‡B†26fRÆövò76Rà£bâF†W&R—2æò&VF&ÆRvVæW&FVBFW‡BÂ6WVFò×FW‡BÂvFW&Ö&²ÂF—7F÷'FVBG—öw&‡’Â†6¶W"†ööF–RÂ÷"Vç&VÆFVB6ÇWGFW"à£râF†R–ÖvRW‡Æ–ç26W6Â7F÷'’Âæ÷BÖW&VÇ’6öÆÆV7F–öâöb&VÆWfçBö&¦V7G3¢F†R÷&–v–âö7F–öâÂF‚÷"ÖV6†æ—6ÒÂæB–×7B&Rf—7VÆÇ’6öææV7FVBà£‚âF†R6ö×÷6—F–öâ†2VF—F÷&–Â†–W&&6‡’æB6–æVÖF–2FWF‚6ö×&&ÆRFò&VÖ—VÒFV6†æöÆöw’ÖæWw26÷fW#¢öæRFöÖ–æçBfö6Âö–çBÂ7W÷'F–ær6öçFW‡BÂæBæò7Fö6²×†÷FòövVæW&–2ÖF6†&ö&BfVVÆ–ærà ¤f÷"¦ööÒææ÷FF–öâò67&VVâ×6†&–ærF¶V÷fW"7F÷&–W27V6–f–6ÆÇ’Â7G&öær–ÖvR6†÷VÆB6ÆV&Ç’6†÷rf–FVòÖVWF–ærv—F‚6WfW&Â'F–6—çG2Â6†&VB×67&VVâ6çf2Ââææ÷FF–öâVâöG&v–ær7G&ö¶Rö7W'6÷"7F–æröâF†B6†&VB67&VVâÂæBVæWF†÷&—¦VB6öçG&öÂ7&VF–ærg&öÒF†Rææ÷FFVB67&VVâF÷v&BGvò÷"Ö÷&R'F–6—çBFWf–6W2âvVæW&–2ÆF÷ÂvVæW&–2ÖVWF–ærw&–BÂ'&÷rÂW6W"–6öâÂ6ögGv&R×WFFRv–æF÷rÂ÷"F÷væÆöB67&VVâ—2–ç7Vff–6–VçBæB×W7Bæ÷B&R&WVW7FVBà ¥&WGW&âôäÅ’fÆ–B¥4ôã §·²'6VÖçF–5öÖF6‚#§G'VRÂ'66÷&R#£Â'FV6†æöÆöw•÷f—6–&ÆR#§G'VRÂ&ÖV6†æ—6Õ÷f—6–&ÆR#§G'VRÂ&6ö×÷6—F–öåöö²#§G'VRÂ&—77VW2#¥²&6öæ6—6R—77VR%ÒÂ'&WG'•öF—&V7F–öâ#¢'7V6–f–2VævÆ—6‚6÷'&V7F–öâ&ö×Bf÷"F†R–ÖvRvVæW&F÷""Â'7VÖÖ'•ö"#¢-‹=‹}‹‹‹Š˜¢˜]ŠíŠ­‹]‹˜­‹M‹ŠÒ˜mŠ­˜­ŠÍŠ’Š}˜M˜]‹Š}ŠÍ‹Š’'×Ğ¥6WB6VÖçF–5öÖF6ƒ×G'VRöæÇ’v†Vâ66÷&R—2BÆV7Bƒ"æBFV6†æöÆöw•÷f—6–&ÆRÂÖV6†æ—6Õ÷f—6–&ÆRÂæB6ö×÷6—F–öåöö²&RÆÂG'VRâf—7VÆÇ’vVæW&–2–ÖvR6ææ÷B72WfVâ–b—B6öçF–ç2F†R6÷'&V7BÆFf÷&ÒæBö&¦V7G2ârrp¢&W7öç6RÒ6Æ–VçBç&W7öç6W2æ7&VFR€¢ÖöFVÃÖ÷2ævWFVçb‚$õTä•õd•4”ôåôÔôDTÂ"Â÷2ævWFVçb‚$õTä•ôÔôDTÂ"Â&wBÓR"’’À¢–çWCÕ·²'&öÆR#¢'W6W""Â&6öçFVçB#¥°¢²'G—R#¢&–çWE÷FW‡B"Â'FW‡B#§&Wf–Wu÷&ö×GÒÀ¢²'G—R#¢&–çWEö–ÖvR"Â&–ÖvU÷W&Â#¦b&FF¦–ÖvRö§Vs¶&6ScBÇ¶–ÖvUö#cGÒ'ÒÀ¢×ÕÒÀ¢7F÷&SÔfÇ6RÀ¢¢&Wf–WrÒW‡G&7Eö§6öâ‡&W7öç6Ræ÷WGWE÷FW‡B¢66÷&RÒÖ‚ƒÂÖ–âƒÂ–çB‡&Wf–WrævWB‚'66÷&R"Â’’’¢&Wf–Wu²'66÷&R%ÒÒ66÷&P¢&Wf–Wu²'6VÖçF–5öÖF6‚%ÒÒ&ööÂ€¢&Wf–WrævWB‚'6VÖçF–5öÖF6‚"’æB66÷&RãÒƒ ¢æB&Wf–WrævWB‚'FV6†æöÆöw•÷f—6–&ÆR"’æB&Wf–WrævWB‚&ÖV6†æ—6Õ÷f—6–&ÆR"¢æB&Wf–WrævWB‚&6ö×÷6—F–öåöö²"¢¢&WGW&â&Wf–Wp ¦FVböf–æEövVÖ–æ•ö–ÖvUöFF‡fÇVS¢ç’’Óâ7G# ¢–b—6–ç7Fæ6R‡fÇVRÂF–7B“ ¢÷WGWEö–ÖvRÒfÇVRævWB‚&÷WGWEö–ÖvR"¢–b—6–ç7Fæ6R†÷WGWEö–ÖvRÂF–7B’æB÷WGWEö–ÖvRævWB‚&FF"“ ¢&WGW&â7G"†÷WGWEö–ÖvU²&FF%Ò¢–bfÇVRævWB‚'G—R"’ÓÒ&–ÖvR"æBfÇVRævWB‚&FF"“ ¢&WGW&â7G"‡fÇVU²&FF%Ò¢f÷"6†–ÆB–âfÇVRçfÇVW2‚“ ¢f÷VæBÒöf–æEövVÖ–æ•ö–ÖvUöFF†6†–ÆB¢–bf÷VæC ¢&WGW&âf÷Væ@¢VÆ–b—6–ç7Fæ6R‡fÇVRÂÆ—7B“ ¢f÷"6†–ÆB–âfÇVS ¢f÷VæBÒöf–æEövVÖ–æ•ö–ÖvUöFF†6†–ÆB¢–bf÷VæC ¢&WGW&âf÷Væ@¢&WGW&â"  ¦FVbvVæW&FUöææõö&ææö–ÖvR‡&ö×C¢7G"Â7V7E÷&F–ó¢7G"Ò#C£R"’ÓâGWÆU·7G"Â7G%Ó ¢•ö¶W’Ò÷2ævWFVçb‚$tTÔ”ä•ô•ô´U’"Â""’ç7G&—‚¢–bæ÷B•ö¶W“ ¢&—6RfÇVTW'&÷"‚$tTÔ”ä•ô•ô´U’—2æ÷B6öæf–wW&VB"¢ÖöFVÂÒ÷2ævWFVçb‚$tTÔ”ä•ô”ÔtUôÔôDTÂ"Â&vVÖ–æ’Ó2ãÖfÆ6‚Ö–ÖvR"’ç7G&—‚¢–ÆöBÒ°¢&ÖöFVÂ#¢ÖöFVÂÀ¢&–çWB#¢·²'G—R#¢'FW‡B"Â'FW‡B#¢&ö×GÕÒÀ¢'&W7öç6Uöf÷&ÖB#¢°¢'G—R#¢&–ÖvR"À¢&Ö–ÖU÷G—R#¢&–ÖvRö§Vr"À¢&7V7E÷&F–ò#¢7V7E÷&F–òÀ¢&–ÖvU÷6—¦R#¢÷2ævWFVçb‚$tTÔ”ä•ô”ÔtUõ4•¤R"Â#²"’À¢ÒÀ¢Ğ¢v—F‚‡GG‚ä6Æ–VçB‡F–ÖV÷WCÖ‡GG‚åF–ÖV÷WBƒ3ãÂ6öææV7CÓ#ã’’26Æ–VçC ¢&W7öç6RÒ6Æ–VçBç÷7B€¢&‡GG3¢òövVæW&F—fVÆæwVvRævöövÆV—2æ6öÒ÷c&WFö–çFW&7F–öç2"À¢†VFW'3×²'‚ÖvöörÖ’Ö¶W’#¢•ö¶W’Â$6öçFVçBÕG—R#¢&Æ–6F–öâö§6öâ'ÒÀ¢§6öã×–ÆöBÀ¢¢–bæ÷B&W7öç6Ræ—5÷7V66W73 ¢G'“ ¢FWF–ÂÒ&W7öç6Ræ§6öâ‚’ævWB‚&W'&÷""Â·Ò’ævWB‚&ÖW76vR"Â&W7öç6RçFW‡B¢W†6WBW†6WF–öã ¢FWF–ÂÒ&W7öç6RçFW‡@¢&—6RfÇVTW'&÷"†b$ææò&ææ&WVW7Bf–ÆVB‡·&W7öç6Rç7FGW5ö6öFWÒ“¢·7G"†FWF–Â•³£S×Ò"¢FFÒ&W7öç6Ræ§6öâ‚¢–ÖvUö#cBÒöf–æEövVÖ–æ•ö–ÖvUöFF†FF¢–bæ÷B–ÖvUö#cC ¢&—6RfÇVTW'&÷"‚$ææò&ææ&WGW&æVBæò–ÖvRFF"¢&WGW&â–ÖvUö#cBÂÖöFVÀ ¦FVbvVæW&FUö÷Væ•ö–ÖvR‡&ö×C¢7G"’ÓâGWÆU·7G"Â7G%Ó ¢•ö¶W’Ò÷2ævWFVçb‚$õTä•ô•ô´U’"Â""’ç7G&—‚¢–bæ÷B•ö¶W“ ¢&—6RfÇVTW'&÷"‚$õTä•ô•ô´U’—2æ÷B6öæf–wW&VB"¢ÖöFVÂÒ÷2ævWFVçb‚$õTä•ô”ÔtUôÔôDTÂ"Â&wBÖ–ÖvRÓ"’ç7G&—‚¢&W7öç6RÒ÷Vä’†•ö¶W“Ö•ö¶W’ÂF–ÖV÷WCÓ3’æ–ÖvW2ævVæW&FR€¢ÖöFVÃÖÖöFVÂÀ¢&ö×C×&ö×BÀ¢6—¦SÒ##GƒS3b"À¢VÆ—G“Ö÷2ævWFVçb‚$õTä•ô”ÔtUõTÄ•E’"Â&ÖVF—VÒ"’ç7G&—‚’À¢÷WGWEöf÷&ÖCÒ&§Vr"À¢ãÓÀ¢¢—FVÒÒ&W7öç6RæFF³Ò–b&W7öç6RæFFVÇ6RæöæP¢–ÖvUö#cBÒvWFGG"†—FVÒÂ&#cEö§6öâ"Â""’–b—FVÒVÇ6R" ¢–bæ÷B–ÖvUö#cBæB—FVÒæBvWFGG"†—FVÒÂ'W&Â"Â""“ ¢–ÖvU÷&W7öç6RÒ‡GG‚ævWB†—FVÒçW&ÂÂF–ÖV÷WCÓ#ÂföÆÆ÷u÷&VF—&V7G3ÕG'VR¢–ÖvU÷&W7öç6Rç&—6Uöf÷%÷7FGW2‚¢–ÖvUö#cBÒ&6ScBæ#cFVæ6öFR†–ÖvU÷&W7öç6Ræ6öçFVçB’æFV6öFR‚&66–’"¢–bæ÷B–ÖvUö#cC ¢&—6RfÇVTW'&÷"‚$÷Vä’&WGW&æVBæò–ÖvRFF"¢&WGW&â–ÖvUö#cBÂÖöFVÀ ¦FVbö—5÷V÷FöW'&÷"†W'&÷#¢W†6WF–öâ“ ¢ÖW76vRÒ7G"†W'&÷"’æÆ÷vW"‚¢&WGW&âç’†Ö&¶W"–âÖW76vRf÷"Ö&¶W"–â‚'V÷F"Â#C#’"Â'&W6÷W&6UöW††W7FVB"Â'&FRÆ–Ö—B"Â'&FUöÆ–Ö—B"Â&W†6VVFVB"’ ¤ç÷7B‚"ö’övVæW&FRÖ–ÖvR"¦FVbvVæW&FUö–ÖvR‡&W¢–ÖvU&WVW7B“ ¢–bæ÷B÷2ævWFVçb‚$tTÔ”ä•ô•ô´U’"’æBæ÷B÷2ævWFVçb‚$õTä•ô•ô´U’"“ ¢&—6R…EEW†6WF–öâƒCÂ-˜M˜R˜­Š­˜RŠ]‹ŠıŠ}ŠòŠ=˜¢˜]‹-˜Šò˜MŠ­˜˜M˜­ŠòŠ}˜M‹]˜‹"¢G'“ ¢&6U÷&ö×BÒf—7VÅ÷&ö×B‡&W¢–ÖvU÷&÷f–FW"Ò&÷Væ’ ¢fÆÆ&6µ÷W6VBÒfÇ6P¢fÆÆ&6µ÷&V6öâÒ" ¢–b÷2ævWFVçb‚$tTÔ”ä•ô•ô´U’"“ ¢G'“ ¢–ÖvUö#cBÂ–ÖvUöÖöFVÂÒvVæW&FUöææõö&ææö–ÖvR†&6U÷&ö×B¢–ÖvU÷&÷f–FW"Ò&vöövÆUöææõö&ææó" ¢W†6WBW†6WF–öâ2vVÖ–æ•öW'&÷# ¢–bæ÷B÷2ævWFVçb‚$õTä•ô•ô´U’"“ ¢&—6P¢fÆÆ&6µ÷W6VBÒG'VP¢fÆÆ&6µ÷&V6öâÒ&vVÖ–æ•÷V÷F"–bö—5÷V÷FöW'&÷"†vVÖ–æ•öW'&÷"’VÇ6R&vVÖ–æ•öW'&÷" ¢–ÖvUö#cBÂ–ÖvUöÖöFVÂÒvVæW&FUö÷Væ•ö–ÖvR†&6U÷&ö×B¢VÇ6S ¢–ÖvUö#cBÂ–ÖvUöÖöFVÂÒvVæW&FUö÷Væ•ö–ÖvR†&6U÷&ö×B¢–b÷2ævWFVçb‚$õTä•ô•ô´U’"“ ¢G'“ ¢&Wf–WrÒ&Wf–Wuö'Gv÷&²„÷Vä’†•ö¶W“Ö÷2ævWFVçb‚$õTä•ô•ô´U’"’’Â&WÂ–ÖvUö#cB¢W†6WBW†6WF–öâ2&Wf–WuöW'&÷# ¢&Wf–WrÒ²'6VÖçF–5öÖF6‚#¤æöæRÂ'66÷&R#¤æöæRÂ&—77VW2#¥µÒÂ'&WG'•öF—&V7F–öâ#¢""Â'7VÖÖ'•ö"#¢-Š­‹‹‹Š­˜m˜˜­‹Š}˜M˜]‹Š}ŠÍ‹Š’Š}˜MŠ‹]‹˜­ŠˆÂ˜Š­˜RŠ}˜MŠ}ŠİŠ­˜Š}‹‚ŠŠ}˜M‹]˜‹Š’Š}˜M˜]˜˜MŠıŠ’â"Â'&Wf–WuöW'&÷"#§7G"‡&Wf–WuöW'&÷"•³£3×Ğ¢VÇ6S ¢&Wf–WrÒ²'6VÖçF–5öÖF6‚#¤æöæRÂ'66÷&R#¤æöæRÂ&—77VW2#¥µÒÂ'&WG'•öF—&V7F–öâ#¢""Â'7VÖÖ'•ö"#¢-˜M˜RŠ­˜ı˜m˜‹Š}˜M˜]‹Š}ŠÍ‹Š’Š}˜MŠ‹]‹˜­Š’˜MŠ=˜bõTä•ô•ô´U’‹­˜­‹˜]˜}˜­Š2â'Ğ¢&WGW&â²&#cEö§6öâ#¦–ÖvUö#cBÂ&Ö–ÖU÷G—R#¢&–ÖvRö§Vr"Â'6Æ–FUöçVÖ&W"#§&Wç6Æ–FUöçVÖ&W"Â'f—7VÅ÷7G–ÆR#§&Wçf—7VÅ÷7G–ÆRÂ&föçB#¢$6—&ò"Â&÷fW&Æ•÷&WV—&VB#¥G'VRÂ&†6‡Fw5ö–åö–ÖvR#¤fÇ6RÂ&'Gv÷&µ÷fW'6–öâ#¢'6–ævÆRÖ–ÖvR×&÷f–FW"ÖfÆÆ&6²×c"Â&vVæW&F–öåöGFV×G2#£Â'f&–çEö–æFW‚#§&Wçf&–çEö–æFW‚Â&–ÖvU÷&÷f–FW"#¦–ÖvU÷&÷f–FW"Â&–ÖvUöÖöFVÂ#¦–ÖvUöÖöFVÂÂ&fÆÆ&6µ÷W6VB#¦fÆÆ&6µ÷W6VBÂ&fÆÆ&6µ÷&V6öâ#¦fÆÆ&6µ÷&V6öâÂ'6VÖçF–5÷&Wf–Wr#§&Wf–WwĞ¢W†6WBW†6WF–öâ2S¢&—6R…EEW†6WF–öâƒSÂb$–ÖvRvVæW&F–öâf–ÆVC¢¶WÒ"
