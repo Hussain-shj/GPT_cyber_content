@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import html
 import io
-import itertools
 import json
 import math
 import os
@@ -17,7 +16,7 @@ import tempfile
 import time
 import wave
 import zipfile
-from datetime import datetime, timezone, date, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Any
 from urllib.parse import unquote, urlparse, urlencode, quote
@@ -25,14 +24,14 @@ from urllib.parse import unquote, urlparse, urlencode, quote
 import psycopg
 import httpx
 from psycopg.rows import dict_row
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, RedirectResponse
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.53.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.51.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -44,7 +43,7 @@ CYBER_SOURCES_FILE = BASE_DIR / "cyber_sources.json"
 AUTH_EXEMPT_PATHS = {"/health", "/auth/linkedin/callback"}
 
 class ContentRequest(BaseModel):
-    topic: str = Field(min_length=3, max_length=300)
+    topic: str = Field(min_length=3, max_length=3000)
     domain: Literal["GRC", "Cybersecurity", "AI Governance", "Privacy"] = "GRC"
     post_type: Literal["Carousel", "Infographic", "Single Post"] = "Carousel"
     platform: Literal["Instagram", "LinkedIn", "Both"] = "Both"
@@ -120,17 +119,29 @@ class LinkedInPublishRequest(BaseModel):
     image_b64: str = Field(default="", max_length=18_000_000)
     image_mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
     images: list[LinkedInImage] = Field(default_factory=list, max_length=20)
+    studio_post_id: str = Field(default="", max_length=200)
 
-class SupportingFileGenerateRequest(BaseModel):
-    post_id: str = Field(min_length=3, max_length=200)
-    post_title: str = Field(min_length=3, max_length=500)
-    post_text: str = Field(min_length=20, max_length=12000)
-    pillar: str = Field(default="GRC", max_length=200)
-    file_type: Literal["دليل عملي", "قائمة تحقق", "ملخص تنفيذي", "نموذج عمل"] = "دليل عملي"
+class LinkedInStudioPost(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    week: int = Field(ge=1, le=12)
+    day: str = Field(default="", max_length=100)
+    pillar: str = Field(default="", max_length=200)
+    objective: str = Field(default="", max_length=100)
+    post_type: str = Field(default="Single Post", max_length=100)
+    title: str = Field(min_length=1, max_length=800)
+    status: str = Field(default="REVIEW", max_length=50)
+    text: str = Field(default="", max_length=20_000)
+    content: dict[str, Any] = Field(default_factory=dict)
+    quality: dict[str, Any] = Field(default_factory=dict)
 
-class SupportingFileUpdateRequest(BaseModel):
-    title: str = Field(min_length=3, max_length=500)
-    content: str = Field(min_length=50, max_length=30000)
+class LinkedInStudioAsset(BaseModel):
+    id: str = Field(min_length=1, max_length=260)
+    kind: Literal["image", "supporting_file"]
+    name: str = Field(default="", max_length=500)
+    mime_type: str = Field(default="application/octet-stream", max_length=200)
+    data_b64: str = Field(min_length=1, max_length=28_000_000)
+    sort_order: int = Field(default=0, ge=0, le=100)
+    alt_text: str = Field(default="", max_length=300)
 
 def database_url(): return os.getenv("DATABASE_URL")
 
@@ -185,16 +196,10 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visual_alert_archives_created_at ON visual_alert_archives(created_at DESC)")
         conn.execute("CREATE TABLE IF NOT EXISTS linkedin_connections(id TEXT PRIMARY KEY DEFAULT 'personal',member_id TEXT NOT NULL,member_name TEXT NOT NULL DEFAULT '',access_token_encrypted TEXT NOT NULL,expires_at TIMESTAMPTZ,connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         conn.execute("CREATE TABLE IF NOT EXISTS linkedin_publications(id TEXT PRIMARY KEY,post_urn TEXT NOT NULL,post_url TEXT NOT NULL,has_image BOOLEAN NOT NULL DEFAULT FALSE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("ALTER TABLE linkedin_publications ADD COLUMN IF NOT EXISTS post_text TEXT NOT NULL DEFAULT ''")
-        conn.execute("ALTER TABLE linkedin_publications ADD COLUMN IF NOT EXISTS post_type TEXT NOT NULL DEFAULT ''")
-        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_analytics_imports(id TEXT PRIMARY KEY,source TEXT NOT NULL DEFAULT 'xlsx',filename TEXT NOT NULL DEFAULT '',row_count INTEGER NOT NULL DEFAULT 0,period_start DATE,period_end DATE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("ALTER TABLE linkedin_analytics_imports ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb")
-        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_analytics_records(id TEXT PRIMARY KEY,import_id TEXT NOT NULL REFERENCES linkedin_analytics_imports(id) ON DELETE CASCADE,record_kind TEXT NOT NULL DEFAULT 'post',record_date DATE,post_urn TEXT,post_url TEXT,post_title TEXT NOT NULL DEFAULT '',post_type TEXT NOT NULL DEFAULT '',impressions BIGINT NOT NULL DEFAULT 0,members_reached BIGINT NOT NULL DEFAULT 0,engagements_reported BIGINT NOT NULL DEFAULT 0,reactions BIGINT NOT NULL DEFAULT 0,comments BIGINT NOT NULL DEFAULT 0,reposts BIGINT NOT NULL DEFAULT 0,saves BIGINT NOT NULL DEFAULT 0,sends BIGINT NOT NULL DEFAULT 0,link_clicks BIGINT NOT NULL DEFAULT 0,followers_gained BIGINT NOT NULL DEFAULT 0,profile_views BIGINT NOT NULL DEFAULT 0,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_analytics_import ON linkedin_analytics_records(import_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_analytics_date ON linkedin_analytics_records(record_date)")
-        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_supporting_files(id TEXT PRIMARY KEY,post_id TEXT NOT NULL,title TEXT NOT NULL,file_type TEXT NOT NULL,pillar TEXT NOT NULL DEFAULT 'GRC',content TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_linkedin_supporting_files_post ON linkedin_supporting_files(post_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_supporting_files_created ON linkedin_supporting_files(created_at DESC)")
+        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_studio_posts(id TEXT PRIMARY KEY,week INTEGER NOT NULL CHECK(week BETWEEN 1 AND 12),day TEXT NOT NULL DEFAULT '',pillar TEXT NOT NULL DEFAULT '',objective TEXT NOT NULL DEFAULT '',post_type TEXT NOT NULL DEFAULT 'Single Post',title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'REVIEW',text TEXT NOT NULL DEFAULT '',content JSONB NOT NULL DEFAULT '{}'::jsonb,quality JSONB NOT NULL DEFAULT '{}'::jsonb,published_url TEXT NOT NULL DEFAULT '',published_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_studio_posts_week ON linkedin_studio_posts(week,created_at)")
+        conn.execute("CREATE TABLE IF NOT EXISTS linkedin_studio_assets(id TEXT PRIMARY KEY,post_id TEXT NOT NULL REFERENCES linkedin_studio_posts(id) ON DELETE CASCADE,kind TEXT NOT NULL CHECK(kind IN ('image','supporting_file')),name TEXT NOT NULL DEFAULT '',mime_type TEXT NOT NULL,data BYTEA NOT NULL,sort_order INTEGER NOT NULL DEFAULT 0,alt_text TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_linkedin_studio_assets_post ON linkedin_studio_assets(post_id,kind,sort_order)")
         conn.commit()
 
 def bootstrap_user():
@@ -258,7 +263,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.53.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.51.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -300,9 +305,7 @@ def linkedin_start():
     payload = issued + "." + nonce
     signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
     state = base64.urlsafe_b64encode((payload + "." + signature).encode()).decode().rstrip("=")
-    scopes = ["openid", "profile", "w_member_social"]
-    if os.getenv("LINKEDIN_ANALYTICS_APPROVED", "").lower() in ("1","true","yes"): scopes.append("r_member_postAnalytics")
-    query = urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"state":state,"scope":" ".join(scopes)})
+    query = urlencode({"response_type":"code","client_id":client_id,"redirect_uri":redirect_uri,"state":state,"scope":"openid profile w_member_social"})
     return RedirectResponse("https://www.linkedin.com/oauth/v2/authorization?" + query)
 
 @app.get("/auth/linkedin/callback")
@@ -338,12 +341,70 @@ def linkedin_status():
     if not configured: return {"configured":False,"connected":False}
     with db_conn() as c: row = c.execute("SELECT member_name,expires_at,connected_at FROM linkedin_connections WHERE id='personal'").fetchone()
     connected = bool(row and (not row["expires_at"] or row["expires_at"] > datetime.now(timezone.utc)))
-    return {"configured":True,"connected":connected,"member_name":row["member_name"] if row else "","expires_at":row["expires_at"] if row else None,"analytics_approved":os.getenv("LINKEDIN_ANALYTICS_APPROVED", "").lower() in ("1","true","yes")}
+    return {"configured":True,"connected":connected,"member_name":row["member_name"] if row else "","expires_at":row["expires_at"] if row else None}
 
 @app.post("/api/linkedin/disconnect")
 def linkedin_disconnect():
     with db_conn() as c: c.execute("DELETE FROM linkedin_connections WHERE id='personal'"); c.commit()
     return {"disconnected":True}
+
+@app.get("/api/linkedin/studio/posts")
+def linkedin_studio_posts(week: int | None = None):
+    query = "SELECT id,week,day,pillar,objective,post_type AS type,title,status,text,content,quality,published_url,published_at,created_at,updated_at FROM linkedin_studio_posts"
+    params: tuple[Any, ...] = ()
+    if week is not None:
+        if week < 1 or week > 12: raise HTTPException(400, "رقم الأسبوع يجب أن يكون من 1 إلى 12")
+        query += " WHERE week=%s"; params = (week,)
+    query += " ORDER BY week,created_at"
+    with db_conn() as c: return c.execute(query, params).fetchall()
+
+@app.post("/api/linkedin/studio/posts")
+def linkedin_studio_post_save(p: LinkedInStudioPost):
+    with db_conn() as c:
+        c.execute("""INSERT INTO linkedin_studio_posts(id,week,day,pillar,objective,post_type,title,status,text,content,quality)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)
+        ON CONFLICT(id) DO UPDATE SET week=EXCLUDED.week,day=EXCLUDED.day,pillar=EXCLUDED.pillar,objective=EXCLUDED.objective,post_type=EXCLUDED.post_type,title=EXCLUDED.title,status=EXCLUDED.status,text=EXCLUDED.text,content=EXCLUDED.content,quality=EXCLUDED.quality,updated_at=NOW()""",
+        (p.id,p.week,p.day,p.pillar,p.objective,p.post_type,p.title,p.status,p.text,json.dumps(p.content,ensure_ascii=False),json.dumps(p.quality,ensure_ascii=False))); c.commit()
+    return {"saved":True,"id":p.id}
+
+@app.delete("/api/linkedin/studio/posts/{post_id}")
+def linkedin_studio_post_delete(post_id: str):
+    with db_conn() as c:
+        cur = c.execute("DELETE FROM linkedin_studio_posts WHERE id=%s", (post_id,)); c.commit()
+    return {"deleted":cur.rowcount>0}
+
+@app.get("/api/linkedin/studio/posts/{post_id}/assets")
+def linkedin_studio_assets(post_id: str):
+    with db_conn() as c:
+        rows = c.execute("SELECT id,kind,name,mime_type,data,sort_order,alt_text,created_at,updated_at FROM linkedin_studio_assets WHERE post_id=%s ORDER BY kind,sort_order,created_at", (post_id,)).fetchall()
+    return [{**{k:v for k,v in row.items() if k != "data"},"data_b64":base64.b64encode(bytes(row["data"])).decode()} for row in rows]
+
+@app.post("/api/linkedin/studio/posts/{post_id}/assets")
+def linkedin_studio_asset_save(post_id: str, asset: LinkedInStudioAsset):
+    try: payload = base64.b64decode(asset.data_b64, validate=True)
+    except Exception: raise HTTPException(400, "بيانات الملف غير صالحة")
+    if len(payload) > 20 * 1024 * 1024: raise HTTPException(413, "حجم الملف يتجاوز 20 MB")
+    with db_conn() as c:
+        if not c.execute("SELECT 1 FROM linkedin_studio_posts WHERE id=%s", (post_id,)).fetchone(): raise HTTPException(404, "منشور LinkedIn غير موجود")
+        c.execute("""INSERT INTO linkedin_studio_assets(id,post_id,kind,name,mime_type,data,sort_order,alt_text)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind,name=EXCLUDED.name,mime_type=EXCLUDED.mime_type,data=EXCLUDED.data,sort_order=EXCLUDED.sort_order,alt_text=EXCLUDED.alt_text,updated_at=NOW()""",
+        (asset.id,post_id,asset.kind,asset.name,asset.mime_type,payload,asset.sort_order,asset.alt_text)); c.commit()
+    return {"saved":True,"id":asset.id,"size":len(payload)}
+
+@app.get("/api/linkedin/studio/posts/{post_id}/assets/{asset_id}/download")
+def linkedin_studio_asset_download(post_id: str, asset_id: str):
+    with db_conn() as c:
+        row = c.execute("SELECT name,mime_type,data FROM linkedin_studio_assets WHERE id=%s AND post_id=%s", (asset_id,post_id)).fetchone()
+    if not row: raise HTTPException(404, "الملف غير موجود")
+    filename = row["name"] or "cyberpulse-file"
+    return Response(content=bytes(row["data"]),media_type=row["mime_type"],headers={"Content-Disposition":f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+@app.delete("/api/linkedin/studio/posts/{post_id}/assets/{asset_id}")
+def linkedin_studio_asset_delete(post_id: str, asset_id: str):
+    with db_conn() as c:
+        cur = c.execute("DELETE FROM linkedin_studio_assets WHERE id=%s AND post_id=%s", (asset_id,post_id)); c.commit()
+    return {"deleted":cur.rowcount>0}
 
 def _linkedin_rtl_text(text: str):
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -392,394 +453,10 @@ def linkedin_publish(req: LinkedInPublishRequest):
     post_urn = response.headers.get("x-restli-id", "")
     post_url = "https://www.linkedin.com/feed/update/" + post_urn + "/" if post_urn else "https://www.linkedin.com/feed/"
     with db_conn() as c:
-        published_type="Carousel" if len(uploaded_images)>1 else "Image" if uploaded_images else "Text"
-        c.execute("INSERT INTO linkedin_publications(id,post_urn,post_url,has_image,post_text,post_type) VALUES(%s,%s,%s,%s,%s,%s)", (str(uuid.uuid4()),post_urn,post_url,bool(content),req.text,published_type)); c.commit()
+        c.execute("INSERT INTO linkedin_publications(id,post_urn,post_url,has_image) VALUES(%s,%s,%s,%s)", (str(uuid.uuid4()),post_urn,post_url,bool(content))); c.commit()
+        if req.studio_post_id:
+            c.execute("UPDATE linkedin_studio_posts SET status='PUBLISHED',published_url=%s,published_at=NOW(),updated_at=NOW() WHERE id=%s", (post_url,req.studio_post_id)); c.commit()
     return {"published":True,"post_urn":post_urn,"post_url":post_url,"image_count":len(uploaded_images)}
-
-def _supporting_file_fallback(req: SupportingFileGenerateRequest):
-    practical = [line.strip(" -•\t") for line in req.post_text.splitlines() if line.strip().startswith(("•", "-"))]
-    practical = practical[:7] or ["حدّد مالكًا واضحًا لكل إجراء وموعدًا مستهدفًا للتنفيذ.", "اربط القرار بالمخاطر والأثر المتوقع على العمل.", "وثّق الأدلة والنتائج، ثم راجع التقدم بصورة دورية."]
-    return "\n".join([f"# {req.post_title}", "## الهدف من الملف", "يحوّل هذا الملف فكرة المنشور إلى خطوات عملية قابلة للمراجعة والتطبيق داخل المؤسسة.", "## لمن أُعد هذا الملف؟", "لقيادات الأمن السيبراني والحوكمة وإدارة المخاطر ومالكي الخدمات والعمليات.", "## خطوات التطبيق", *[f"- {item}" for item in practical], "## أسئلة المراجعة", "- هل نطاق الموضوع والقرار المطلوب محددان بوضوح؟", "- هل يوجد مالك تنفيذي ومؤشر لقياس التقدم؟", "- هل تم توثيق المخاطر والاعتماد والاستثناءات؟", "## المخرج المطلوب", "قرار موثق، وخطة تنفيذ محددة المسؤوليات والمواعيد، وآلية متابعة قابلة للقياس.", "## تنبيه مهني", "هذا الملف إرشادي ويجب تكييفه مع سياسات المؤسسة ومتطلباتها التنظيمية وشهية المخاطر المعتمدة."])
-
-def _generate_supporting_file_content(req: SupportingFileGenerateRequest):
-    if not os.getenv("OPENAI_API_KEY"): return _supporting_file_fallback(req)
-    prompt = f'''أنت مستشار أمن معلومات وحوكمة مؤسسية. أنشئ ملفًا داعمًا عربيًا احترافيًا من نوع: {req.file_type}.
-الموضوع: {req.post_title}
-المجال: {req.pillar}
-نص منشور LinkedIn المصدر:
-{req.post_text}
-
-استخدم فقط الأفكار المدعومة في المنشور، ولا تخترع أرقامًا أو قوانين أو معايير أو مراجع. حوّل المنشور إلى قيمة عملية أعمق دون تكراره حرفيًا.
-أعد Markdown عربيًا فقط، من 700 إلى 1200 كلمة، يبدأ بعنوان # واحد، ثم أقسام ## قصيرة وواضحة. أضف حسب ملاءمة النوع: الهدف، الجمهور، طريقة الاستخدام، خطوات عملية، قائمة تحقق، أسئلة قرار، مخرجات متوقعة، وتنبيه مهني. استخدم قوائم تبدأ بـ - عند الحاجة. لا تضف هاشتاقات أو دعوة تسويقية أو معلومات تواصل.'''
-    result = OpenAI(api_key=os.getenv("OPENAI_API_KEY")).responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5"), input=prompt, store=False)
-    content = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", result.output_text.strip(), flags=re.I|re.S)
-    if len(content) < 200: raise HTTPException(502, "لم يُرجع النموذج محتوى كافيًا للملف الداعم")
-    return content
-
-@app.get("/api/linkedin/supporting-files")
-def linkedin_supporting_files():
-    with db_conn() as c: return c.execute("SELECT id,post_id,title,file_type,pillar,content,created_at,updated_at FROM linkedin_supporting_files ORDER BY created_at DESC LIMIT 100").fetchall()
-
-@app.post("/api/linkedin/supporting-files")
-def linkedin_supporting_file_generate(req: SupportingFileGenerateRequest):
-    content = _generate_supporting_file_content(req)
-    title = next((line.lstrip("# ").strip() for line in content.splitlines() if line.startswith("# ")), req.post_title)
-    file_id = str(uuid.uuid4())
-    with db_conn() as c:
-        existing = c.execute("SELECT id FROM linkedin_supporting_files WHERE post_id=%s", (req.post_id,)).fetchone()
-        if existing:
-            file_id = existing["id"]
-            c.execute("UPDATE linkedin_supporting_files SET title=%s,file_type=%s,pillar=%s,content=%s,updated_at=NOW() WHERE id=%s", (title,req.file_type,req.pillar,content,file_id))
-        else: c.execute("INSERT INTO linkedin_supporting_files(id,post_id,title,file_type,pillar,content) VALUES(%s,%s,%s,%s,%s,%s)", (file_id,req.post_id,title,req.file_type,req.pillar,content))
-        c.commit()
-    return {"id":file_id,"post_id":req.post_id,"title":title,"file_type":req.file_type,"pillar":req.pillar,"content":content}
-
-@app.put("/api/linkedin/supporting-files/{file_id}")
-def linkedin_supporting_file_update(file_id: str, req: SupportingFileUpdateRequest):
-    with db_conn() as c: cur = c.execute("UPDATE linkedin_supporting_files SET title=%s,content=%s,updated_at=NOW() WHERE id=%s", (req.title,req.content,file_id)); c.commit()
-    if not cur.rowcount: raise HTTPException(404, "الملف الداعم غير موجود")
-    return {"saved":True,"id":file_id}
-
-@app.delete("/api/linkedin/supporting-files/{file_id}")
-def linkedin_supporting_file_delete(file_id: str):
-    with db_conn() as c: cur = c.execute("DELETE FROM linkedin_supporting_files WHERE id=%s", (file_id,)); c.commit()
-    return {"deleted":bool(cur.rowcount)}
-
-def _supporting_pdf(record):
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.colors import HexColor
-    from reportlab.lib.utils import ImageReader
-    from PIL import Image, ImageDraw, ImageFont
-    font_path = BASE_DIR / "assets" / "fonts" / "Cairo.ttf"
-    if not font_path.exists(): raise HTTPException(500, "خط Cairo غير موجود في الخادم")
-    out = io.BytesIO(); width, height = A4; c = canvas.Canvas(out, pagesize=A4, pageCompression=1)
-    navy, cyan, ink, muted, pale = map(HexColor, ("#071827","#18C7C2","#102B45","#567086","#F2F7FA"))
-    margin, right, y, page = 44, width-44, height-116, 0
-    scale=3
-    font_cache={}
-    measure_draw=ImageDraw.Draw(Image.new("RGBA",(2,2)))
-    def pil_font(size):
-        key=int(size*scale)
-        if key not in font_cache: font_cache[key]=ImageFont.truetype(str(font_path),key)
-        return font_cache[key]
-    def text_width(value,size): return measure_draw.textlength(str(value),font=pil_font(size),direction="rtl",language="ar")/scale
-    def draw_rtl(value,x_right,y_baseline,size,color):
-        value=str(value); font=pil_font(size); box=measure_draw.textbbox((0,0),value,font=font,direction="rtl",language="ar",stroke_width=0)
-        px_w=max(2,box[2]-box[0]+10*scale); px_h=max(2,box[3]-box[1]+6*scale)
-        image=Image.new("RGBA",(px_w,px_h),(255,255,255,0)); draw=ImageDraw.Draw(image)
-        if color.startswith("0x"): color="#"+color[2:]
-        rgb=tuple(int(color[i:i+2],16) for i in (1,3,5))+(255,)
-        draw.text((px_w-4*scale,-box[1]+2*scale),value,font=font,fill=rgb,anchor="ra",direction="rtl",language="ar")
-        pt_w,pt_h=px_w/scale,px_h/scale
-        c.drawImage(ImageReader(image),x_right-pt_w,y_baseline-(pt_h*.72),width=pt_w,height=pt_h,mask="auto")
-    def page_start():
-        nonlocal y,page; page+=1; c.setFillColor(navy); c.rect(0,height-78,width,78,stroke=0,fill=1); c.setStrokeColor(cyan); c.setLineWidth(3); c.line(margin,height-78,right,height-78); draw_rtl("نبض سيبراني",right,height-34,17,"#18C7C2"); draw_rtl("معلومة موثوقة .. وحماية تبدأ بالوعي",right,height-55,8.5,"#D7FFFF"); c.setFillColor(muted); c.setFont("Helvetica",8); c.drawString(margin,24,f"CYBER PULSE  |  {page}"); y=height-112
-    def ensure(space):
-        nonlocal y
-        if y-space<48: c.showPage(); page_start()
-    def logical_wrap(text,size,max_width):
-        words=str(text).split(); lines=[]; line=""
-        for word in words:
-            test=f"{line} {word}".strip()
-            if line and text_width(test,size)>max_width: lines.append(line); line=word
-            else: line=test
-        if line: lines.append(line)
-        return lines
-    def block(text,size=10.5,color=ink,leading=18,bullet=False):
-        nonlocal y
-        lines=logical_wrap(text,size,right-margin-(18 if bullet else 0)); ensure(max(leading,len(lines)*leading+6))
-        for i,line in enumerate(lines):
-            draw_rtl(line,right-(18 if bullet else 0),y,size,color.hexval())
-            if bullet and i==0: c.setFillColor(cyan); c.circle(right-6,y+3,2.7,stroke=0,fill=1); c.setFillColor(color)
-            y-=leading
-        y-=5
-    page_start()
-    for raw in record["content"].splitlines():
-        line=raw.strip()
-        if not line: y-=6; continue
-        if line.startswith("# "): ensure(85); c.setFillColor(pale); c.roundRect(margin,y-58,right-margin,72,10,stroke=0,fill=1); block(line[2:],18,navy,25); y-=10
-        elif line.startswith("## "): ensure(48); y-=5; block(line[3:],13.5,HexColor("#087F82"),22); c.setStrokeColor(HexColor("#C7E8E7")); c.line(margin,y+5,right,y+5); y-=7
-        elif line.startswith(("- ","• ")): block(line[2:],10.2,ink,18,bullet=True)
-        else: block(line,10.5,ink,18)
-    c.save(); out.seek(0); return out.getvalue()
-
-@app.get("/api/linkedin/supporting-files/{file_id}/pdf")
-def linkedin_supporting_file_pdf(file_id: str):
-    with db_conn() as c: record = c.execute("SELECT id,title,content FROM linkedin_supporting_files WHERE id=%s", (file_id,)).fetchone()
-    if not record: raise HTTPException(404, "الملف الداعم غير موجود")
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", record["title"]).strip("-")[:60] or "cyber-pulse-supporting-file"
-    return Response(_supporting_pdf(record), media_type="application/pdf", headers={"Content-Disposition":f'attachment; filename="{safe}.pdf"',"Cache-Control":"no-store"})
-
-LINKEDIN_ANALYTICS_ALIASES = {
-    "record_date": ["date","day","posted date","publish date","created date","التاريخ","تاريخ النشر"],
-    "post_title": ["post title","title","post","content","post text","اسم المنشور","عنوان المنشور","المحتوى"],
-    "post_url": ["post url","post link","url","link","رابط المنشور","الرابط"],
-    "post_type": ["post type","content type","format","نوع المنشور","نوع المحتوى"],
-    "impressions": ["impressions","post impressions","views","المشاهدات","مرات الظهور"],
-    "members_reached": ["members reached","unique impressions","reach","الوصول","الأعضاء الذين تم الوصول إليهم"],
-    "engagements_reported": ["engagements","total engagements","engagement","إجمالي التفاعل","التفاعل"],
-    "reactions": ["reactions","likes","reaction count","التفاعلات","الإعجابات"],
-    "comments": ["comments","comment count","التعليقات"],
-    "reposts": ["reposts","reshares","shares","repost count","إعادة النشر","المشاركات"],
-    "saves": ["saves","post saves","حفظ","عمليات الحفظ"],
-    "sends": ["sends","post sends","send count","عمليات الإرسال"],
-    "link_clicks": ["link clicks","clicks","النقرات","نقرات الرابط"],
-    "followers_gained": ["followers gained","new followers","متابعون جدد","المتابعون الجدد"],
-    "profile_views": ["profile views from post","profile views","مشاهدات الملف الشخصي"],
-}
-
-def _analytics_header(value):
-    return re.sub(r"[^a-z0-9\u0600-\u06ff]+", " ", str(value or "").strip().lower()).strip()
-
-ANALYTICS_HEADER_MAP = { _analytics_header(alias): key for key, aliases in LINKEDIN_ANALYTICS_ALIASES.items() for alias in aliases }
-ANALYTICS_METRICS = ("impressions","members_reached","engagements_reported","reactions","comments","reposts","saves","sends","link_clicks","followers_gained","profile_views")
-
-def _analytics_int(value):
-    if value is None or value == "": return 0
-    if isinstance(value, (int,float)): return max(0, int(value))
-    text = str(value).strip().replace(",", "").replace("٬", "").replace("%", "")
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    return max(0, int(float(match.group()))) if match else 0
-
-def _analytics_date(value):
-    if isinstance(value, datetime): return value.date()
-    if isinstance(value, date): return value
-    text = str(value or "").strip()
-    for fmt in ("%Y-%m-%d","%m/%d/%Y","%d/%m/%Y","%b %d, %Y","%d %b %Y"):
-        try: return datetime.strptime(text, fmt).date()
-        except ValueError: pass
-    return None
-
-def _analytics_post_urn(url):
-    match = re.search(r"urn:li:(?:share|ugcPost):\d+", str(url or ""))
-    return match.group() if match else None
-
-def _analytics_post_label(url):
-    slug=unquote(str(url or "").split("/posts/")[-1])
-    slug=re.sub(r"^hussain-alblooshi_", "", slug, flags=re.I)
-    slug=re.sub(r"-(?:ugcPost|share)-\d+-.+$", "", slug)
-    return re.sub(r"[-_]+", " ", slug).strip()[:500] or "منشور LinkedIn"
-
-def _parse_linkedin_xlsx(raw: bytes):
-    from openpyxl import load_workbook
-    try: workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-    except Exception as exc: raise HTTPException(400, f"تعذر قراءة ملف XLSX: {str(exc)[:300]}")
-    parsed=[]; metadata={"demographics":{}}; daily_map={}; posts={}
-    def daily_record(day):
-        if day not in daily_map: daily_map[day]={"record_kind":"daily","record_date":day,"post_title":"","post_type":"",**{m:0 for m in ANALYTICS_METRICS}}
-        return daily_map[day]
-    for sheet in workbook.worksheets:
-        rows=[tuple(row[:60]) for row in itertools.islice(sheet.iter_rows(values_only=True),5001)]
-        sheet_name=_analytics_header(sheet.title)
-        if sheet_name=="discovery":
-            total={"record_kind":"aggregate_total","record_date":None,"post_title":"","post_type":"",**{m:0 for m in ANALYTICS_METRICS}}
-            for row in rows:
-                label=_analytics_header(row[0] if row else ""); value=row[1] if len(row)>1 else None
-                if label=="impressions": total["impressions"]=_analytics_int(value)
-                elif label=="members reached": total["members_reached"]=_analytics_int(value)
-                elif label=="overall performance": metadata["period_label"]=str(value or "")
-            if total["impressions"] or total["members_reached"]: parsed.append(total)
-            continue
-        if sheet_name=="engagement" and rows:
-            for row in rows[1:]:
-                day=_analytics_date(row[0] if row else None)
-                if day:
-                    target=daily_record(day); target["impressions"]=_analytics_int(row[1] if len(row)>1 else 0); target["engagements_reported"]=_analytics_int(row[2] if len(row)>2 else 0)
-            continue
-        if sheet_name=="followers":
-            if rows: metadata["total_followers"]=_analytics_int(rows[0][1] if len(rows[0])>1 else 0)
-            for row in rows[3:]:
-                day=_analytics_date(row[0] if row else None)
-                if day: daily_record(day)["followers_gained"]=_analytics_int(row[1] if len(row)>1 else 0)
-            continue
-        if sheet_name=="top posts":
-            for row in rows[3:]:
-                for base,metric in ((0,"engagements_reported"),(4,"impressions")):
-                    url=str(row[base] or "").strip() if len(row)>base else ""
-                    if not url: continue
-                    target=posts.setdefault(url,{"record_kind":"post","record_date":_analytics_date(row[base+1] if len(row)>base+1 else None),"post_urn":_analytics_post_urn(url),"post_url":url[:2000],"post_title":_analytics_post_label(url),"post_type":"",**{m:0 for m in ANALYTICS_METRICS}})
-                    target[metric]=_analytics_int(row[base+2] if len(row)>base+2 else 0)
-            continue
-        if sheet_name in ("audience demographics","content demographics"):
-            key="audience" if sheet_name.startswith("audience") else "content"; groups={}
-            for row in rows[1:]:
-                if len(row)>=3 and row[0]: groups.setdefault(str(row[0]),[]).append({"label":str(row[1]),"percentage":str(row[2])})
-            metadata["demographics"][key]=groups
-            continue
-        header_index=None; columns={}
-        for idx,row in enumerate(rows[:30]):
-            mapped={pos:ANALYTICS_HEADER_MAP.get(_analytics_header(value)) for pos,value in enumerate(row)}
-            mapped={pos:key for pos,key in mapped.items() if key}
-            metric_count=sum(key in ANALYTICS_METRICS for key in mapped.values())
-            if metric_count >= 1 and ("record_date" in mapped.values() or "post_title" in mapped.values() or "post_url" in mapped.values()): header_index=idx; columns=mapped; break
-        if header_index is None: continue
-        sheet_rows=[]
-        for row in rows[header_index+1:]:
-            item={key:(row[pos] if pos<len(row) else None) for pos,key in columns.items()}
-            metrics={key:_analytics_int(item.get(key)) for key in ANALYTICS_METRICS}
-            title=str(item.get("post_title") or "").strip(); url=str(item.get("post_url") or "").strip(); record_date=_analytics_date(item.get("record_date"))
-            if not any(metrics.values()) or not (title or url or record_date): continue
-            sheet_rows.append({"record_kind":"post" if title or url else "daily","record_date":record_date,"post_urn":_analytics_post_urn(url),"post_url":url[:2000] or None,"post_title":title[:2000],"post_type":str(item.get("post_type") or "").strip()[:200],**metrics})
-        detailed=any(x["record_kind"]=="post" or x["record_date"] for x in sheet_rows)
-        parsed.extend(x for x in sheet_rows if not detailed or x["record_kind"]=="post" or x["record_date"])
-    parsed.extend(daily_map.values()); parsed.extend(posts.values())
-    if not parsed: raise HTTPException(400, "لم أجد جدول تحليلات معروفًا. صدّر ملف Post analytics بصيغة XLSX من LinkedIn ثم ارفعه كما هو.")
-    return {"records":parsed,"metadata":metadata}
-
-def _save_analytics_import(source, filename, records, metadata=None):
-    import_id=str(uuid.uuid4()); dates=[r["record_date"] for r in records if r.get("record_date") and r.get("record_kind")=="daily"] or [r["record_date"] for r in records if r.get("record_date")]
-    with db_conn() as c:
-        c.execute("INSERT INTO linkedin_analytics_imports(id,source,filename,row_count,period_start,period_end,metadata) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)", (import_id,source,filename,len(records),min(dates) if dates else None,max(dates) if dates else None,json.dumps(metadata or {},ensure_ascii=False)))
-        for r in records:
-            c.execute("INSERT INTO linkedin_analytics_records(id,import_id,record_kind,record_date,post_urn,post_url,post_title,post_type,impressions,members_reached,engagements_reported,reactions,comments,reposts,saves,sends,link_clicks,followers_gained,profile_views) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(uuid.uuid4()),import_id,r.get("record_kind","post"),r.get("record_date"),r.get("post_urn"),r.get("post_url"),r.get("post_title",""),r.get("post_type",""),*[r.get(k,0) for k in ANALYTICS_METRICS]))
-        c.commit()
-    return import_id
-
-@app.post("/api/linkedin/analytics/import")
-async def linkedin_analytics_import(file: UploadFile = File(...)):
-    filename=str(file.filename or "linkedin-analytics.xlsx")
-    if not filename.lower().endswith(".xlsx"): raise HTTPException(415, "ارفع ملف LinkedIn Analytics بصيغة XLSX")
-    raw=await file.read(10*1024*1024+1)
-    if len(raw)>10*1024*1024: raise HTTPException(413, "حجم الملف يتجاوز 10 MB")
-    if not raw.startswith(b"PK"): raise HTTPException(400, "ملف XLSX غير صالح")
-    result=_parse_linkedin_xlsx(raw); records=result["records"]; import_id=_save_analytics_import("xlsx",filename,records,result["metadata"])
-    return {"imported":True,"import_id":import_id,"row_count":len(records),"filename":filename}
-
-def _analytics_metric_value(records, metric):
-    total_rows=[r for r in records if r["record_kind"]=="aggregate_total" and r[metric]]
-    if total_rows: return max(r[metric] for r in total_rows)
-    daily=[r for r in records if r["record_kind"]=="daily"]
-    base=daily if daily else [r for r in records if r["record_kind"]=="post"]
-    return sum(r[metric] for r in base)
-
-def _analytics_recommendations(records, top_posts, by_type, by_weekday, engagement_rate):
-    tips=[]
-    if by_type:
-        best=max(by_type,key=lambda x:(x["engagement_rate"],x["impressions"]))
-        tips.append({"title":"كرّر الصيغة الأقوى","text":f"صيغة {best['label']} حققت أفضل معدل تفاعل ({best['engagement_rate']:.1f}%). خصص لها منشورًا واحدًا على الأقل أسبوعيًا."})
-    if by_weekday:
-        best=max(by_weekday,key=lambda x:(x["engagement_rate"],x["impressions"]))
-        tips.append({"title":"اختبر يوم الأداء الأفضل","text":f"أفضل نتيجة تاريخية ظهرت يوم {best['label']}. انشر فيه موضوعًا رئيسيًا خلال الأسابيع الثلاثة القادمة وقارن النتيجة."})
-    if top_posts:
-        tips.append({"title":"حوّل الفائز إلى سلسلة","text":f"المنشور الأقوى «{top_posts[0]['title'][:90]}» يستحق منشور متابعة وChecklist أو Carousel يكمل الفكرة نفسها."})
-    if engagement_rate < 2:
-        tips.append({"title":"ارفع جودة الدعوة للتفاعل","text":"معدل التفاعل أقل من 2%. استخدم سؤال قرار محدد في نهاية المنشور، واختصر المقدمة، واجعل القيمة العملية ظاهرة في أول ثلاثة أسطر."})
-    else: tips.append({"title":"حافظ على التفاعل","text":f"معدل التفاعل الحالي {engagement_rate:.1f}%. ركّز على الحفظ والمشاركة عبر ملفات عملية وقوائم تحقق مرتبطة بالمنشور."})
-    return tips[:4]
-
-def _analytics_pct(value):
-    match=re.search(r"\d+(?:\.\d+)?",str(value or "")); return float(match.group()) if match else 0
-
-def _analytics_advisor(latest, records, totals, top_posts, by_weekday, previous_totals=None):
-    daily=[r for r in records if r["record_kind"]=="daily" and r["record_date"]]; metadata=latest.get("metadata") or {}; demographics=metadata.get("demographics",{})
-    engagements=totals["engagements"]; rate=totals["engagement_rate"]; new_followers=totals.get("followers_gained",0); total_followers=_analytics_int(metadata.get("total_followers"))
-    months={}
-    for r in daily:
-        key=r["record_date"].strftime("%Y-%m"); x=months.setdefault(key,{"impressions":0,"engagements":0}); x["impressions"]+=r["impressions"]; x["engagements"]+=r["engagements_reported"]
-    best_month=max(months.items(),key=lambda x:x[1]["impressions"]) if months else None
-    active_days=sum(1 for r in daily if r["impressions"]>0); period_posts=[r for r in records if r["record_kind"]=="post" and (not latest.get("period_start") or not r["record_date"] or latest["period_start"]<=r["record_date"]<=latest["period_end"])]
-    post_days=len({r["record_date"] for r in period_posts if r["record_date"]}); max_per_day=max((sum(1 for r in period_posts if r["record_date"]==day) for day in {r["record_date"] for r in period_posts if r["record_date"]}),default=0)
-    content_demo=demographics.get("content",{}); audience_demo=demographics.get("audience",{})
-    content_sen={x["label"]:_analytics_pct(x["percentage"]) for x in content_demo.get("Seniority",[])}; audience_sen={x["label"]:_analytics_pct(x["percentage"]) for x in audience_demo.get("Seniority",[])}
-    leaders=content_sen.get("Director",0)+content_sen.get("CXO",0)+content_sen.get("VP",0); entry=content_sen.get("Entry",0)
-    strengths=[]; risks=[]
-    if rate>=3.5: strengths.append(f"معدل التفاعل {rate:.2f}% صحي ويؤكد أن المحتوى مناسب للجمهور الحالي.")
-    if best_month and totals["impressions"]: strengths.append(f"الشهر الأقوى حقق {best_month[1]['impressions']:,} مشاهدة، أي {best_month[1]['impressions']/totals['impressions']*100:.0f}% من الفترة.")
-    if top_posts: strengths.append(f"أفضل منشور حقق {top_posts[0]['impressions']:,} مشاهدة، ويمكن تحويل موضوعه إلى سلسلة وملف عملي.")
-    if post_days and len(period_posts)>post_days: risks.append(f"تم رصد {len(period_posts)} منشورًا خلال {post_days} يوم نشر، وبحد أقصى {max_per_day} منشورات في اليوم؛ هذا قد يوزع التفاعل بين المنشورات.")
-    if new_followers<30: risks.append(f"النمو بلغ {new_followers} متابعًا جديدًا فقط؛ المطلوب تقوية دعوة المتابعة وربطها بوعد معرفي واضح.")
-    if leaders and leaders<15: risks.append(f"نسبة Director/CXO/VP في جمهور المحتوى {leaders:.0f}%؛ تحتاج محتوى قرارات تنفيذية أكثر للوصول إلى أصحاب القرار.")
-    if entry>25: risks.append(f"فئة Entry تمثل {entry:.0f}% من جمهور المحتوى، ما يشير إلى أن الطرح تعليمي أكثر من كونه قياديًا.")
-    comparisons={}
-    if previous_totals:
-        for key in ("impressions","engagements","followers_gained"):
-            old=previous_totals.get(key,0); comparisons[key]={"current":totals.get(key,0),"previous":old,"change_pct":round((totals.get(key,0)-old)/old*100,1) if old else None}
-    view_target=max(4500,int(math.ceil(totals["impressions"]*1.5/500)*500)); follower_target=max(30,int(math.ceil(max(new_followers,1)*1.7/5)*5)); top_target=max(250,int(math.ceil((top_posts[0]["impressions"] if top_posts else 0)*1.25/50)*50))
-    schedule=[{"day":"الأحد","content":"تحليل قيادي: NIST أو ISO 27001 أو حوكمة المخاطر"},{"day":"الثلاثاء","content":"رأي شخصي من واقع قيادة أمن المعلومات"},{"day":"الخميس","content":"خبر أو ثغرة مع الأثر والإجراء المطلوب"},{"day":"السبت","content":"Checklist أو Carousel مع ملف داعم"}]
-    studio_plan=[
-        ["لماذا أصبحت Govern أهم إضافة في NIST CSF 2.0؟","قرار سيبراني يجب أن يملكه مجلس الإدارة","ثغرة حديثة: ما أثرها الإداري؟","Checklist: جاهزية الحوكمة وفق NIST CSF 2.0"],
-        ["5 مؤشرات مخاطر يحتاجها المدير التنفيذي","من واقع العمل: لماذا تفشل بعض سجلات المخاطر؟","كيف تربط الخبر السيبراني بقرار عملي؟","نموذج: تقرير مخاطر مختصر للإدارة العليا"],
-        ["ISO 27001: الامتثال لا يعني النضج","متى يقبل المسؤول التنفيذي المخاطر؟","مخاطر الذكاء الاصطناعي التي لا تظهر في التقارير","Checklist: مراجعة مخاطر استخدام أدوات AI"],
-        ["كيف تبني خارطة طريق سيبرانية مبنية على المخاطر؟","درس قيادي من مشروع أو حادث سيبراني","ما الذي يجب أن تسأل عنه المورد قبل التعاقد؟","Checklist: Executive GRC Health Check"]]
-    return {"executive_summary":f"حقق الحساب {totals['impressions']:,} مشاهدة و{engagements:,} تفاعل بمعدل {rate:.2f}%. الأداء يتحسن، لكن الأولوية القادمة هي تقليل تزاحم النشر وتحويل الوصول إلى متابعين وأصحاب قرار.","strengths":strengths,"risks":risks,"audience":{"leaders_pct":leaders,"entry_pct":entry,"total_followers":total_followers,"director_gap":round(audience_sen.get('Director',0)-content_sen.get('Director',0),1),"content":content_demo},"activity":{"active_days":active_days,"posts":len(period_posts),"post_days":post_days,"max_posts_per_day":max_per_day},"comparison":comparisons,"targets":[{"label":"المشاهدات","target":view_target,"current":totals["impressions"]},{"label":"معدل التفاعل","target":round(max(4.5,rate+0.6),1),"current":rate,"unit":"%"},{"label":"متابعون جدد","target":follower_target,"current":new_followers},{"label":"أفضل منشور","target":top_target,"current":top_posts[0]["impressions"] if top_posts else 0}],"content_mix":[{"label":"حوكمة ومخاطر وقرارات الإدارة","percentage":40},{"label":"أدوات وملفات داعمة","percentage":25},{"label":"أخبار وثغرات بتفسير عملي","percentage":20},{"label":"تجارب وآراء قيادية","percentage":15}],"schedule":schedule,"studio_plan":studio_plan,"measurement_note":"تحليل الأيام يعكس وقت حدوث المشاهدات، وليس بالضرورة وقت نشر المنشور؛ لذلك تعامل معه كاختبار لمدة 4 أسابيع."}
-
-@app.get("/api/linkedin/analytics/dashboard")
-def linkedin_analytics_dashboard():
-    with db_conn() as c:
-        latest=c.execute("SELECT * FROM linkedin_analytics_imports ORDER BY created_at DESC LIMIT 1").fetchone()
-        history=c.execute("SELECT id,source,filename,row_count,period_start,period_end,created_at FROM linkedin_analytics_imports ORDER BY created_at DESC LIMIT 12").fetchall()
-        records=c.execute("SELECT * FROM linkedin_analytics_records WHERE import_id=%s",(latest["id"],)).fetchall() if latest else []
-        previous_records=c.execute("SELECT * FROM linkedin_analytics_records WHERE import_id=%s",(history[1]["id"],)).fetchall() if len(history)>1 else []
-    if not latest: return {"empty":True,"analytics_approved":os.getenv("LINKEDIN_ANALYTICS_APPROVED","").lower() in ("1","true","yes"),"history":[]}
-    totals={k:_analytics_metric_value(records,k) for k in ANALYTICS_METRICS}; calculated_engagements=sum(totals[k] for k in ("reactions","comments","reposts","saves","sends")); engagements=totals["engagements_reported"] or calculated_engagements; engagement_rate=(engagements/totals["impressions"]*100) if totals["impressions"] else 0
-    post_rows=[r for r in records if r["record_kind"]=="post"]
-    daily_rows=[r for r in records if r["record_kind"]=="daily"]
-    trend_map={}
-    for r in daily_rows if daily_rows else post_rows:
-        if not r["record_date"]: continue
-        key=r["record_date"].isoformat(); row=trend_map.setdefault(key,{"date":key,"impressions":0,"engagements":0})
-        row["impressions"]+=r["impressions"]; row["engagements"]+=r["engagements_reported"] or sum(r[k] for k in ("reactions","comments","reposts","saves","sends"))
-    top=[]
-    for r in post_rows:
-        e=r["engagements_reported"] or sum(r[k] for k in ("reactions","comments","reposts","saves","sends")); top.append({"title":r["post_title"] or "منشور LinkedIn","url":r["post_url"],"type":r["post_type"] or "غير محدد","date":r["record_date"].isoformat() if r["record_date"] else None,"impressions":r["impressions"],"engagements":e,"engagement_rate":round(e/r["impressions"]*100,2) if r["impressions"] else 0})
-    top=sorted(top,key=lambda x:(x["impressions"],x["engagement_rate"]),reverse=True)[:10]
-    type_map={}; day_names=["الإثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت","الأحد"]; day_map={}
-    for r in post_rows:
-        e=r["engagements_reported"] or sum(r[k] for k in ("reactions","comments","reposts","saves","sends")); label=r["post_type"] or "غير محدد"; x=type_map.setdefault(label,{"label":label,"impressions":0,"engagements":0}); x["impressions"]+=r["impressions"]; x["engagements"]+=e
-        if r["record_date"]:
-            label=day_names[r["record_date"].weekday()]; x=day_map.setdefault(label,{"label":label,"impressions":0,"engagements":0}); x["impressions"]+=r["impressions"]; x["engagements"]+=e
-    def finish(values):
-        for x in values: x["engagement_rate"]=round(x["engagements"]/x["impressions"]*100,2) if x["impressions"] else 0
-        return sorted(values,key=lambda x:x["impressions"],reverse=True)
-    by_type=finish(list(type_map.values())); by_weekday=finish(list(day_map.values()))
-    totals={**totals,"engagements":engagements,"engagement_rate":round(engagement_rate,2)}
-    previous_totals=None
-    if previous_records:
-        previous_totals={k:_analytics_metric_value(previous_records,k) for k in ANALYTICS_METRICS}; previous_totals["engagements"]=previous_totals["engagements_reported"] or sum(previous_totals[k] for k in ("reactions","comments","reposts","saves","sends"))
-    return {"empty":False,"analytics_approved":os.getenv("LINKEDIN_ANALYTICS_APPROVED","").lower() in ("1","true","yes"),"latest_import":latest,"history":history,"totals":totals,"trend":sorted(trend_map.values(),key=lambda x:x["date"]),"top_posts":top,"by_type":by_type,"by_weekday":by_weekday,"recommendations":_analytics_recommendations(records,top,by_type,by_weekday,engagement_rate),"advisor":_analytics_advisor(latest,records,totals,top,by_weekday,previous_totals)}
-
-def _linkedin_analytics_headers(token): return {"Authorization":f"Bearer {token}","Linkedin-Version":os.getenv("LINKEDIN_API_VERSION","202608"),"X-Restli-Protocol-Version":"2.0.0","Content-Type":"application/json"}
-
-@app.post("/api/linkedin/analytics/sync")
-def linkedin_analytics_sync(days: int = 90):
-    if os.getenv("LINKEDIN_ANALYTICS_APPROVED","").lower() not in ("1","true","yes"): raise HTTPException(409,"المرحلة الثانية جاهزة، لكنها بانتظار اعتماد صلاحية r_member_postAnalytics من LinkedIn")
-    days=max(7,min(365,days)); token,_=_linkedin_token(); start=date.today()-timedelta(days=days); end=date.today()+timedelta(days=1); records=[]
-    with db_conn() as c: publications=c.execute("SELECT post_urn,post_url,post_text,post_type,created_at FROM linkedin_publications WHERE created_at >= %s ORDER BY created_at DESC LIMIT 12",(datetime.combine(start,datetime.min.time(),tzinfo=timezone.utc),)).fetchall()
-    daily_metrics={"IMPRESSION":"impressions","REACTION":"reactions","COMMENT":"comments","RESHARE":"reposts","POST_SAVE":"saves","POST_SEND":"sends"}
-    total_metrics={"MEMBERS_REACHED":"members_reached","LINK_CLICKS":"link_clicks","FOLLOWER_GAINED_FROM_CONTENT":"followers_gained","PROFILE_VIEW_FROM_CONTENT":"profile_views"}
-    date_range=f"(start:(day:{start.day},month:{start.month},year:{start.year}),end:(day:{end.day},month:{end.month},year:{end.year}))"
-    with httpx.Client(timeout=45) as client:
-        for query_type,key in daily_metrics.items():
-            url="https://api.linkedin.com/rest/memberCreatorPostAnalytics?"+urlencode({"q":"me","queryType":query_type,"aggregation":"DAILY","dateRange":date_range},safe="(),:")
-            response=client.get(url,headers=_linkedin_analytics_headers(token))
-            if response.status_code in (401,403): raise HTTPException(response.status_code,"أعد ربط LinkedIn بعد اعتماد صلاحية التحليلات")
-            if response.status_code>=400: raise HTTPException(502,f"تعذر مزامنة {query_type}: {response.text[:400]}")
-            for item in response.json().get("elements",[]):
-                dr=item.get("dateRange",{}).get("start",{}); d=date(dr["year"],dr["month"],dr["day"]) if all(x in dr for x in ("year","month","day")) else None
-                row=next((x for x in records if x["record_kind"]=="daily" and x["record_date"]==d),None)
-                if not row: row={"record_kind":"daily","record_date":d,**{m:0 for m in ANALYTICS_METRICS},"post_title":"","post_type":""}; records.append(row)
-                row[key]=_analytics_int(item.get("count"))
-        total={"record_kind":"aggregate_total","record_date":end,**{m:0 for m in ANALYTICS_METRICS},"post_title":"","post_type":""}
-        for query_type,key in total_metrics.items():
-            url="https://api.linkedin.com/rest/memberCreatorPostAnalytics?"+urlencode({"q":"me","queryType":query_type,"aggregation":"TOTAL","dateRange":date_range},safe="(),:")
-            response=client.get(url,headers=_linkedin_analytics_headers(token))
-            if response.status_code<400: total[key]=sum(_analytics_int(x.get("count")) for x in response.json().get("elements",[]))
-        records.append(total)
-        entity_metrics={"IMPRESSION":"impressions","MEMBERS_REACHED":"members_reached","REACTION":"reactions","COMMENT":"comments","RESHARE":"reposts","POST_SAVE":"saves","POST_SEND":"sends"}
-        for publication in publications:
-            urn=str(publication["post_urn"] or "")
-            if urn.startswith("urn:li:share:"): entity=f"(share:{quote(urn,safe='')})"
-            elif urn.startswith("urn:li:ugcPost:"): entity=f"(ugc:{quote(urn,safe='')})"
-            else: continue
-            row={"record_kind":"post","record_date":publication["created_at"].date(),"post_urn":urn,"post_url":publication["post_url"],"post_title":str(publication["post_text"] or "منشور LinkedIn").splitlines()[0][:500],"post_type":publication["post_type"],**{m:0 for m in ANALYTICS_METRICS}}
-            for query_type,key in entity_metrics.items():
-                url="https://api.linkedin.com/rest/memberCreatorPostAnalytics?"+urlencode({"q":"entity","entity":entity,"queryType":query_type,"aggregation":"TOTAL"},safe="(),:%")
-                response=client.get(url,headers=_linkedin_analytics_headers(token))
-                if response.status_code<400: row[key]=sum(_analytics_int(x.get("count")) for x in response.json().get("elements",[]))
-            records.append(row)
-    import_id=_save_analytics_import("linkedin_api",f"LinkedIn API - {days} days",records)
-    return {"synced":True,"import_id":import_id,"row_count":len(records),"days":days}
 
 def _visual_job_update(job_id: str, **values):
     with VISUAL_ALERT_JOBS_LOCK:
