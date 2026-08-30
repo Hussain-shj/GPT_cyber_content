@@ -57,36 +57,12 @@ Create a LinkedIn Developer application, add the **Share on LinkedIn** and
 The OAuth access token is encrypted before it is stored in PostgreSQL. The UI
 always shows an editable preview before publishing and supports text, one
 JPEG/PNG image, or up to 20 ordered images through LinkedIn MultiImage posts.
-
-### LinkedIn supporting files
-
-LinkedIn AI Studio can generate an Arabic supporting file for any post as a
-practical guide, checklist, executive brief, or working template. The draft is
-editable, stored centrally in PostgreSQL, and downloaded as a branded RTL PDF
-using the bundled Cairo font. A post that promises readers a supporting file is
-blocked from publishing until the file has been generated.
-
-### LinkedIn analytics dashboard
-
-The dashboard is delivered in two phases:
-
-1. Upload the `.xlsx` file exported from LinkedIn combined post analytics. The
-   importer detects common English and Arabic column labels, stores the latest
-   dataset in PostgreSQL, and produces KPIs, trends, top posts, content-format
-   comparisons, weekday comparisons, and practical recommendations.
-2. Automatic synchronization is already implemented with LinkedIn's
-   `memberCreatorPostAnalytics` API. Keep
-   `LINKEDIN_ANALYTICS_APPROVED=false` while the application is under review.
-   After LinkedIn grants `r_member_postAnalytics`, set the variable to `true`,
-   redeploy, and reconnect the LinkedIn account once to grant the new scope.
-
-Analytics endpoints:
-
-- `POST /api/linkedin/analytics/import`
-- `GET /api/linkedin/analytics/dashboard`
-- `POST /api/linkedin/analytics/sync?days=90`
-
 GRC slides are rendered with their Arabic text and brand logo before upload.
+
+LinkedIn AI Studio stores its 12-week posts centrally in PostgreSQL. Post text,
+content, review/publishing status, ordered images, supporting files, and the
+published LinkedIn URL remain available across devices. Existing browser data is
+migrated to PostgreSQL automatically on the first load after deployment.
 - `POST /api/visual-alert/render`
 - `GET /api/visual-alert/status/{job_id}`
 - `GET /api/visual-alert/video/{job_id}`
