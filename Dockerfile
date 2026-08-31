@@ -20,4 +20,9 @@ RUN npm ci --omit=dev && npx remotion browser ensure
 
 COPY . .
 
+# Keep linkedin.js source readable and append the premium browser-side compositor
+# only inside the built container. This preserves existing LinkedIn Studio logic
+# while ensuring the approved/persisted/published image is the branded 4:5 JPEG.
+RUN cat linkedin-premium-branding.js >> linkedin.js
+
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
