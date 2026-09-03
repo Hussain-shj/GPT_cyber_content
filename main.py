@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.53.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.54.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -145,6 +145,10 @@ class LinkedInStudioAsset(BaseModel):
     data_b64: str = Field(min_length=1, max_length=28_000_000)
     sort_order: int = Field(default=0, ge=0, le=100)
     alt_text: str = Field(default="", max_length=300)
+
+class SupportingFileGenerateRequest(BaseModel):
+    file_type: Literal["دليل عملي", "قائمة تحقق", "ملخص تنفيذي", "نموذج عمل"] = "دليل عملي"
+    title: str = Field(default="", max_length=500)
 
 def database_url(): return os.getenv("DATABASE_URL")
 
@@ -287,7 +291,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.53.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.54.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -437,6 +441,104 @@ def linkedin_studio_asset_delete(post_id: str, asset_id: str):
     with db_conn() as c:
         cur = c.execute("DELETE FROM linkedin_studio_assets WHERE id=%s AND post_id=%s", (asset_id,post_id)); c.commit()
     return {"deleted":cur.rowcount>0}
+
+def _supporting_outline(post, req: SupportingFileGenerateRequest):
+    content=post.get("content") or {}; slides=content.get("slides") or []
+    source_names=[str(x.get("name") or x.get("url") or "").strip() for x in content.get("sources",[]) if isinstance(x,dict)]
+    practical=[str(x) for x in content.get("recommendations",[]) if str(x).strip()]
+    defaults=[
+        {"headline":"لماذا يهم هذا الموضوع؟","body":str(content.get("hook") or post.get("text") or "")[:700],"bullets":[]},
+        {"headline":"المفاهيم الأساسية","body":str(content.get("caption") or post.get("text") or "")[:850],"bullets":[]},
+        {"headline":"خطوات التطبيق","body":"حوّل الفكرة إلى إجراءات واضحة يمكن متابعتها وقياسها داخل المؤسسة.","bullets":practical[:5]},
+        {"headline":"قائمة مراجعة عملية","body":"استخدم النقاط التالية عند المراجعة أو اتخاذ القرار.","bullets":practical[:5]},
+        {"headline":"الخلاصة","body":str(content.get("cta") or "ابدأ بخطوة محددة، عيّن مالكًا، ثم راجع النتيجة بصورة دورية."),"bullets":[]},
+    ]
+    fallback_pages=[]
+    for index,default in enumerate(defaults):
+        slide=slides[index+1] if len(slides)>index+1 else {}
+        slide_body=str(slide.get("body") or "").strip(); default_body=str(default["body"] or "").strip()
+        fallback_pages.append({"headline":str(slide.get("headline") or default["headline"]),"body":f"{slide_body} {default_body}".strip()[:1000],"bullets":default["bullets"][:4]})
+    fallback={"title":req.title.strip() or post["title"],"subtitle":f"{req.file_type} مبسط للتطبيق العملي","pages":fallback_pages[:5],"sources":source_names[:4]}
+    if not os.getenv("OPENAI_API_KEY"): return fallback
+    prompt=f'''أنشئ ملفًا داعمًا عربيًا احترافيًا من خمس صفحات داخلية لمنشور LinkedIn، وسيضاف له غلاف منفصل.
+نوع الملف: {req.file_type}
+العنوان المقترح: {req.title or post["title"]}
+المحتوى المسموح استخدامه فقط:
+{post.get("text","")}
+{json.dumps(content,ensure_ascii=False)[:12000]}
+
+القواعد:
+- الناتج دليل مهني محايد، لا تستخدم صياغة المتكلم مثل: أرى، من وجهة نظري، كرئيس، كمدير، أنصحكم.
+- لا تخاطب القارئ بصيغة شخصية ولا تنسب المحتوى إلى منصب أو تجربة شخصية.
+- لا تخترع معيارًا أو رقمًا أو واقعة أو مرجعًا غير موجود في المدخلات.
+- خمس صفحات داخلية بالضبط، كل صفحة: عنوان أقصى 9 كلمات، فقرة 35-65 كلمة، وحتى 4 نقاط قصيرة.
+- الصفحة الأخيرة خلاصة أو قائمة تحقق عملية.
+- أعد JSON فقط: title, subtitle, pages[{headline,body,bullets}], sources[].'''
+    try:
+        client=OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        data=extract_json(client.responses.create(model=os.getenv("OPENAI_MODEL","gpt-5"),input=prompt,store=False).output_text)
+        pages=data.get("pages") or []
+        if len(pages)!=5: return fallback
+        banned=re.compile(r"(?:\bأرى\b|من وجهة نظري|كرئيس|كمدير|أنصحكم)")
+        for page in pages:
+            text=" ".join([str(page.get("headline","")),str(page.get("body",""))," ".join(map(str,page.get("bullets") or []))])
+            if banned.search(text): return fallback
+        return {"title":str(data.get("title") or fallback["title"])[:500],"subtitle":str(data.get("subtitle") or fallback["subtitle"])[:300],"pages":[{"headline":str(p.get("headline") or "")[:300],"body":str(p.get("body") or "")[:1600],"bullets":[str(x)[:350] for x in (p.get("bullets") or [])[:4]]} for p in pages],"sources":source_names[:4]}
+    except Exception:
+        return fallback
+
+def _supporting_pdf_carousel(outline):
+    from PIL import Image,ImageDraw,ImageFont
+    width,height=1080,1350; font_path=str(BASE_DIR/"assets"/"fonts"/"Cairo.ttf")
+    navy="#153F3A";navy2="#0D2E2B";cyan="#00AFA5";ink="#102B2A";body="#425D5A";paper="#F7FAF9";line="#DCEAE7";pale="#E7F7F4"
+    fonts={}
+    def font(size):
+        if size not in fonts:fonts[size]=ImageFont.truetype(font_path,size)
+        return fonts[size]
+    def wrapped(draw,text,max_width,size,max_lines):
+        words=str(text or "").replace("\n"," ").split();lines=[];current=""
+        for word in words:
+            test=f"{current} {word}".strip()
+            if draw.textlength(test,font=font(size),direction="rtl",language="ar")<=max_width:current=test
+            elif current:lines.append(current);current=word
+            else:lines.append(word)
+        if current:lines.append(current)
+        if len(lines)>max_lines:lines=lines[:max_lines];lines[-1]=lines[-1].rstrip(".، ")+"…"
+        return lines
+    def right_lines(draw,text,x,y,max_width,size,leading,max_lines,color=body):
+        for i,row in enumerate(wrapped(draw,text,max_width,size,max_lines)):draw.text((x,y+i*leading),row,font=font(size),fill=color,anchor="ra",direction="rtl",language="ar")
+    def logo(draw,dark=False):
+        color="#FFFFFF" if dark else navy;draw.rounded_rectangle((70,55,150,135),radius=18,outline=cyan,width=5);draw.line((82,95,100,95,110,76,124,114,136,95,146,95),fill=cyan,width=5,joint="curve");draw.text((430,76),"نبض سيبراني",font=font(27),fill=color,anchor="ra",direction="rtl",language="ar");draw.text((185,103),"CYBER PULSE",font=font(17),fill=cyan,anchor="la")
+    def footer(draw,page,total):
+        draw.rectangle((0,1295,width,height),fill=navy);draw.text((1010,1321),"دليل نبض سيبراني",font=font(15),fill="#FFFFFF",anchor="ra",direction="rtl",language="ar");draw.text((70,1321),f"{page}/{total}",font=font(14),fill="#FFFFFF",anchor="la")
+    pages=[];total=6
+    im=Image.new("RGB",(width,height),navy);draw=ImageDraw.Draw(im);draw.ellipse((-300,770,540,1610),fill=navy2)
+    for i in range(8):draw.arc((-280+i*32,710+i*25,650+i*42,1510+i*46),15,135,fill="#3E6B64",width=2)
+    logo(draw,True);draw.rounded_rectangle((720,195,1010,250),radius=26,fill=cyan);draw.text((865,222),"ملف داعم | دليل عملي",font=font(21),fill=navy,anchor="mm",direction="rtl",language="ar")
+    size=70
+    while len(wrapped(draw,outline["title"],880,size,4))>4 and size>48:size-=2
+    right_lines(draw,outline["title"],980,410,880,size,size+18,4,"#FFFFFF");draw.rectangle((760,790,980,797),fill=cyan);right_lines(draw,outline.get("subtitle",""),980,850,780,31,48,4,"#D8EAE7");footer(draw,1,total);pages.append(im)
+    for index,page in enumerate(outline["pages"],2):
+        im=Image.new("RGB",(width,height),paper);draw=ImageDraw.Draw(im);draw.rectangle((0,0,width,24),fill=navy);draw.rectangle((0,24,width,31),fill=cyan);logo(draw,False)
+        draw.rounded_rectangle((70,145,260,193),radius=24,fill=pale);draw.text((165,169),f"الفصل {index-1}",font=font(18),fill=navy,anchor="mm",direction="rtl",language="ar")
+        draw.rounded_rectangle((875,205,1000,330),radius=28,fill=navy);draw.text((937,267),f"{index-1:02d}",font=font(45),fill=cyan,anchor="mm")
+        right_lines(draw,page.get("headline",""),820,225,700,50,68,3,ink);draw.rectangle((650,415,820,421),fill=cyan)
+        draw.rounded_rectangle((70,475,1010,1065),radius=28,fill="#FFFFFF",outline=line,width=2);draw.rectangle((978,520,985,1020),fill=cyan);right_lines(draw,page.get("body",""),930,555,790,31,53,7,body)
+        y=790
+        for bullet in page.get("bullets") or []:
+            draw.ellipse((888,y-12,932,y+32),fill=pale);draw.ellipse((904,y+4,916,y+16),fill=cyan);right_lines(draw,bullet,865,y,700,25,40,2,ink);y+=78
+        if index==total and outline.get("sources"):right_lines(draw,"المراجع: "+" | ".join(outline["sources"]),980,1220,900,14,24,2,"#6D817E")
+        footer(draw,index,total);pages.append(im)
+    buffer=io.BytesIO();pages[0].save(buffer,format="PDF",save_all=True,append_images=pages[1:],resolution=120,quality=90,optimize=True);return buffer.getvalue()
+
+@app.post("/api/linkedin/studio/posts/{post_id}/supporting-file/generate")
+def linkedin_studio_supporting_file_generate(post_id: str, req: SupportingFileGenerateRequest):
+    with db_conn() as c: post=c.execute("SELECT id,title,text,content FROM linkedin_studio_posts WHERE id=%s",(post_id,)).fetchone()
+    if not post: raise HTTPException(404,"منشور LinkedIn غير موجود")
+    outline=_supporting_outline(post,req); pdf=_supporting_pdf_carousel(outline); asset_id=f"{post_id}-support-generated-{uuid.uuid4().hex[:10]}"; name=f"{outline['title'][:90]}.pdf"
+    with db_conn() as c:
+        c.execute("INSERT INTO linkedin_studio_assets(id,post_id,kind,name,mime_type,data,sort_order,alt_text) VALUES(%s,%s,'supporting_file',%s,'application/pdf',%s,0,%s)",(asset_id,post_id,name,pdf,"ملف داعم بهوية نبض سيبراني"));c.commit()
+    return {"generated":True,"id":asset_id,"name":name,"mime_type":"application/pdf","size":len(pdf),"title":outline["title"],"pages":6}
 
 def _linkedin_rtl_text(text: str):
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
