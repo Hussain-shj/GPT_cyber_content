@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.52.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.53.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -287,7 +287,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.52.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.53.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -1249,6 +1249,22 @@ def demo_payload(req):
     n = req.slides if req.post_type == "Carousel" else 1
     return {"mode":"demo","title":req.topic,"hook":req.topic,"caption":"محتوى تجريبي.","recommendations":[],"cta":"شارك رأيك.","keywords":["GRC"],"hashtags":["#GRC"],"slides":[{"number":i+1,"headline":req.topic,"body":"نص تجريبي."} for i in range(n)],"sources":[]}
 
+CAROUSEL_PERSONAL_VOICE = re.compile(
+    r"(?:^|[\s،,:؛.!؟])(?:أرى|ارى|أعتقد|اعتقد|برأيي|في\s+رأيي|من\s+وجهة\s+نظري|"
+    r"بصفتي|كرئيس|كمدير|كمسؤول|كخبير|من\s+موقعي|من\s+خبرتي|أوصي|اوصي|نوصي|أؤكد|اؤكد)"
+    r"(?=$|[\s،,:؛.!؟])",
+    re.I,
+)
+
+def carousel_voice_violations(payload: dict) -> list[str]:
+    violations = []
+    for slide in payload.get("slides", []):
+        for field in ("headline", "body"):
+            value = str(slide.get(field, ""))
+            if CAROUSEL_PERSONAL_VOICE.search(value):
+                violations.append(f"slide {slide.get('number', '?')} {field}")
+    return violations
+
 @app.post("/api/generate-content")
 def generate_content(req: ContentRequest):
     if not os.getenv("OPENAI_API_KEY"): return demo_payload(req)
@@ -1271,11 +1287,21 @@ Reference: {source.get('name', '')}, pages {source.get('pages', '')}.
 Grounding notes: {item.get('grounding', '')}
 The caption should paraphrase the reference in an original voice and must end with a short source line naming the reference and pages. Do not quote long passages.
 """
-    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides. {grounding}"
+    carousel_style = "" if req.post_type != "Carousel" else """
+The carousel is a neutral practical field guide, not a personal opinion or a message spoken by a CISO, director, president, manager, or expert. Write slide text in an objective instructional style using facts, definitions, steps, checks, and direct practical guidance. Never use first-person authority or opinion language, including: أرى، أعتقد، برأيي، في رأيي، من وجهة نظري، بصفتي، كرئيس، كمدير، كمسؤول، كخبير، من موقعي، من خبرتي، أوصي، نوصي، أؤكد. Do not introduce the author or the author's job title inside any slide.
+"""
+    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides. {carousel_style} {grounding}"
     kw = {"model":model,"input":prompt,"store":False}
     if req.use_web_search: kw["tools"]=[{"type":"web_search"}]
     try:
         d = extract_json(client.responses.create(**kw).output_text)
+        if req.post_type == "Carousel" and carousel_voice_violations(d):
+            repair_prompt = f"""Rewrite the following JSON so every carousel slide reads as a neutral practical guide. Remove all first-person opinions, recommendations attributed to the speaker, author titles, and phrases such as أرى، أعتقد، برأيي، بصفتي، كرئيس، كمدير، كمسؤول، أوصي، نوصي، أؤكد. Preserve the factual meaning, slide count, JSON schema, source fidelity, and CTA. Return ONLY corrected JSON.\n\n{json.dumps(d, ensure_ascii=False)}"""
+            repair_kw = {"model": model, "input": repair_prompt, "store": False}
+            d = extract_json(client.responses.create(**repair_kw).output_text)
+        violations = carousel_voice_violations(d) if req.post_type == "Carousel" else []
+        if violations:
+            raise ValueError(f"Carousel guide voice check failed: {', '.join(violations)}")
         for slide in d.get("slides", []):
             for field, limit in (("headline", 9), ("body", 32)):
                 words = str(slide.get(field, "")).split()
