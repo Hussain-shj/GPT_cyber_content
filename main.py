@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.51.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.52.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -40,6 +40,7 @@ NEWS_SEARCH_JS = BASE_DIR / "news-search.js"
 VISUAL_ALERT_JS = BASE_DIR / "visual-alert.js"
 LINKEDIN_JS = BASE_DIR / "linkedin.js"
 CYBER_SOURCES_FILE = BASE_DIR / "cyber_sources.json"
+LINKEDIN_REFERENCE_PLAN_FILE = BASE_DIR / "linkedin_reference_plan.json"
 AUTH_EXEMPT_PATHS = {"/health", "/auth/linkedin/callback"}
 
 class ContentRequest(BaseModel):
@@ -52,6 +53,8 @@ class ContentRequest(BaseModel):
     slides: int = Field(default=6, ge=1, le=10)
     tone: str = "Professional, practical, executive-friendly"
     use_web_search: bool = False
+    reference_week: int | None = Field(default=None, ge=1, le=12)
+    reference_slot: int | None = Field(default=None, ge=1, le=4)
 
 class ImageRequest(BaseModel):
     title: str
@@ -159,6 +162,27 @@ def load_cyber_sources():
     except Exception:
         return []
 
+def load_linkedin_reference_plan():
+    try:
+        plan = json.loads(LINKEDIN_REFERENCE_PLAN_FILE.read_text(encoding="utf-8"))
+        weeks = plan.get("weeks", [])
+        if len(weeks) != 12 or any(len(week) != 4 for week in weeks):
+            raise ValueError("Reference plan must contain 12 weeks with 4 topics each")
+        return plan
+    except Exception as exc:
+        print("LinkedIn reference plan warning:", exc)
+        return {"version": 0, "weeks": []}
+
+def linkedin_reference_for(week: int | None, slot: int | None):
+    if week is None or slot is None:
+        return None
+    plan = load_linkedin_reference_plan()
+    try:
+        item = plan["weeks"][week - 1][slot - 1]
+        return item, plan.get("drive_folder_url", "")
+    except (IndexError, KeyError, TypeError):
+        raise HTTPException(422, "مرجع موضوع LinkedIn غير صالح")
+
 def source_hosts():
     hosts = set()
     for src in load_cyber_sources():
@@ -263,7 +287,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.51.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.52.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -272,8 +296,16 @@ def health():
         "bytez_video_configured":bool(os.getenv("BYTEZ_API_KEY")),
         "bytez_video_model":os.getenv("BYTEZ_VIDEO_MODEL", "automatic"),
         "visual_alert_editor":"fixed-brand-outro-v24", "brand_outro":True, "gemini_tts_model":os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
-        "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists())
+        "remotion_runtime_ready":bool(shutil.which("node") and (BASE_DIR / "node_modules" / "@remotion" / "renderer").exists()),
+        "linkedin_reference_topics":sum(len(week) for week in load_linkedin_reference_plan().get("weeks", []))
     }
+
+@app.get("/api/linkedin/reference-plan")
+def linkedin_reference_plan():
+    plan = load_linkedin_reference_plan()
+    if not plan.get("weeks"):
+        raise HTTPException(503, "مكتبة مراجع LinkedIn غير متاحة")
+    return plan
 
 def _linkedin_config():
     client_id = os.getenv("LINKEDIN_CLIENT_ID", "").strip()
@@ -1221,7 +1253,25 @@ def demo_payload(req):
 def generate_content(req: ContentRequest):
     if not os.getenv("OPENAI_API_KEY"): return demo_payload(req)
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")); model = os.getenv("OPENAI_MODEL", "gpt-5")
-    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides."
+    reference = linkedin_reference_for(req.reference_week, req.reference_slot)
+    grounding = ""
+    source_payload = []
+    if reference:
+        item, folder_url = reference
+        source = item.get("source", {})
+        source_payload = [{
+            "name": source.get("name", ""),
+            "pages": source.get("pages", ""),
+            "url": folder_url,
+            "why_relevant": item.get("grounding", "")
+        }]
+        grounding = f"""
+Use this supplied reference as the factual foundation. Do not add facts, figures, standards claims, or page citations that are not supported by it.
+Reference: {source.get('name', '')}, pages {source.get('pages', '')}.
+Grounding notes: {item.get('grounding', '')}
+The caption should paraphrase the reference in an original voice and must end with a short source line naming the reference and pages. Do not quote long passages.
+"""
+    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides. {grounding}"
     kw = {"model":model,"input":prompt,"store":False}
     if req.use_web_search: kw["tools"]=[{"type":"web_search"}]
     try:
@@ -1230,6 +1280,9 @@ def generate_content(req: ContentRequest):
             for field, limit in (("headline", 9), ("body", 32)):
                 words = str(slide.get(field, "")).split()
                 slide[field] = " ".join(words[:limit]) + ("…" if len(words) > limit else "")
+        if source_payload:
+            d["sources"] = source_payload
+            d["source_grounded"] = True
         d["mode"]="openai"; return d
     except Exception as e: raise HTTPException(500, f"Generation failed: {e}")
 

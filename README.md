@@ -63,6 +63,18 @@ LinkedIn AI Studio stores its 12-week posts centrally in PostgreSQL. Post text,
 content, review/publishing status, ordered images, supporting files, and the
 published LinkedIn URL remain available across devices. Existing browser data is
 migrated to PostgreSQL automatically on the first load after deployment.
+
+### Reference-grounded LinkedIn plan
+
+`linkedin_reference_plan.json` contains 48 topics across 12 weeks, curated from
+the seven unique PDF references supplied in the project Google Drive folder.
+Each topic includes a source title, page range, and concise grounding notes.
+The backend resolves the reference by week and slot, injects only that trusted
+context into generation, and overwrites model-supplied citations with the stored
+source metadata. Duplicate PDF copies are intentionally excluded.
+
+- `GET /api/linkedin/reference-plan`
+- `POST /api/generate-content` with `reference_week` and `reference_slot`
 - `POST /api/visual-alert/render`
 - `GET /api/visual-alert/status/{job_id}`
 - `GET /api/visual-alert/video/{job_id}`
