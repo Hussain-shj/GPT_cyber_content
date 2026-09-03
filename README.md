@@ -64,6 +64,11 @@ content, review/publishing status, ordered images, supporting files, and the
 published LinkedIn URL remain available across devices. Existing browser data is
 migrated to PostgreSQL automatically on the first load after deployment.
 
+Each post can generate a six-page Arabic supporting PDF inside the platform.
+The file follows the approved Cyber Pulse Carousel identity with Cairo, RTL,
+neutral guide wording, numbered chapters, practical cards, footer branding,
+and PostgreSQL storage. Manual supporting-file upload remains available.
+
 ### Reference-grounded LinkedIn plan
 
 `linkedin_reference_plan.json` contains 48 topics across 12 weeks, curated from
