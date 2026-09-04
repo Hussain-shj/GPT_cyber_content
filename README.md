@@ -69,8 +69,11 @@ without asking the user to upload a file. Generation starts with the curated
 project-reference and page mapping in `linkedin_reference_plan.json`; if that
 material is insufficient, it searches only approved primary domains such as
 NIST, CISA, ISO, ISACA, ISC2, ENISA, NCSC, and OWASP. The file follows the
-approved Cyber Pulse Carousel identity with Cairo, RTL, neutral guide wording,
-numbered chapters, practical cards, footer branding, and PostgreSQL storage.
+approved Cyber Pulse Carousel identity on true A4 pages with Cairo, RTL,
+neutral guide wording, numbered chapters, practical cards, footer branding,
+and PostgreSQL storage. Its layout engine measures every wrapped line before
+drawing and rejects output whose promised question/point count differs from
+the items actually rendered.
 
 ### Reference-grounded LinkedIn plan
 
