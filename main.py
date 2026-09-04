@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="GPT Cyber Content API", version="0.54.0")
+app = FastAPI(title="GPT Cyber Content API", version="0.55.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
@@ -291,7 +291,7 @@ def mobile_js():
 @app.get("/health")
 def health():
     return {
-        "status":"ok", "version":"0.54.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
+        "status":"ok", "version":"0.55.0", "openai_configured":bool(os.getenv("OPENAI_API_KEY")),
         "gemini_configured":bool(os.getenv("GEMINI_API_KEY")),
         "image_provider":"google_nano_banana_2_with_openai_fallback" if os.getenv("GEMINI_API_KEY") and os.getenv("OPENAI_API_KEY") else "google_nano_banana_2" if os.getenv("GEMINI_API_KEY") else "openai" if os.getenv("OPENAI_API_KEY") else "unconfigured",
         "image_model":os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -444,7 +444,21 @@ def linkedin_studio_asset_delete(post_id: str, asset_id: str):
 
 def _supporting_outline(post, req: SupportingFileGenerateRequest):
     content=post.get("content") or {}; slides=content.get("slides") or []
-    source_names=[str(x.get("name") or x.get("url") or "").strip() for x in content.get("sources",[]) if isinstance(x,dict)]
+    day_slot={"الإثنين":1,"الثلاثاء":2,"الخميس":3,"السبت":4}.get(str(post.get("day") or "")); reference=None
+    try: reference=linkedin_reference_for(post.get("week"),day_slot) if day_slot else None
+    except HTTPException: reference=None
+    reference_item=reference[0] if reference else {}; reference_source=reference_item.get("source",{})
+    supplied_sources=[x for x in content.get("sources",[]) if isinstance(x,dict)]
+    reference_label=str(reference_source.get("name") or "").strip()
+    if reference_label and reference_source.get("pages"): reference_label+=f"، ص {reference_source['pages']}"
+    source_names=[reference_label]+[str(x.get("name") or x.get("url") or "").strip() for x in supplied_sources]
+    source_names=list(dict.fromkeys(x for x in source_names if x))
+    grounding=str(reference_item.get("grounding") or "").strip()
+    if not grounding:
+        grounding="\n".join(str(x.get("why_relevant") or "").strip() for x in supplied_sources if x.get("why_relevant"))
+    source_detail=""
+    if grounding:
+        source_detail=f"المرجع الأساسي من ملفات المستخدم: {reference_source.get('name') or (source_names[0] if source_names else '')}، الصفحات {reference_source.get('pages') or ''}.\nالمادة المستخلصة من المرجع: {grounding}"
     practical=[str(x) for x in content.get("recommendations",[]) if str(x).strip()]
     defaults=[
         {"headline":"لماذا يهم هذا الموضوع؟","body":str(content.get("hook") or post.get("text") or "")[:700],"bullets":[]},
@@ -458,7 +472,7 @@ def _supporting_outline(post, req: SupportingFileGenerateRequest):
         slide=slides[index+1] if len(slides)>index+1 else {}
         slide_body=str(slide.get("body") or "").strip(); default_body=str(default["body"] or "").strip()
         fallback_pages.append({"headline":str(slide.get("headline") or default["headline"]),"body":f"{slide_body} {default_body}".strip()[:1000],"bullets":default["bullets"][:4]})
-    fallback={"title":req.title.strip() or post["title"],"subtitle":f"{req.file_type} مبسط للتطبيق العملي","pages":fallback_pages[:5],"sources":source_names[:4]}
+    fallback={"title":req.title.strip() or post["title"],"subtitle":f"{req.file_type} مبسط للتطبيق العملي","pages":fallback_pages[:5],"sources":source_names[:4],"research_mode":"user_reference" if grounding else "post_content"}
     if not os.getenv("OPENAI_API_KEY"): return fallback
     prompt=f'''أنشئ ملفًا داعمًا عربيًا احترافيًا من خمس صفحات داخلية لمنشور LinkedIn، وسيضاف له غلاف منفصل.
 نوع الملف: {req.file_type}
@@ -466,24 +480,39 @@ def _supporting_outline(post, req: SupportingFileGenerateRequest):
 المحتوى المسموح استخدامه فقط:
 {post.get("text","")}
 {json.dumps(content,ensure_ascii=False)[:12000]}
+{source_detail}
 
 القواعد:
 - الناتج دليل مهني محايد، لا تستخدم صياغة المتكلم مثل: أرى، من وجهة نظري، كرئيس، كمدير، أنصحكم.
 - لا تخاطب القارئ بصيغة شخصية ولا تنسب المحتوى إلى منصب أو تجربة شخصية.
-- لا تخترع معيارًا أو رقمًا أو واقعة أو مرجعًا غير موجود في المدخلات.
+- استخدم المرجع الأساسي أعلاه أولًا إن وجد. لا تخترع معيارًا أو رقمًا أو واقعة أو مرجعًا غير موجود في المدخلات أو نتائج البحث.
 - خمس صفحات داخلية بالضبط، كل صفحة: عنوان أقصى 9 كلمات، فقرة 35-65 كلمة، وحتى 4 نقاط قصيرة.
 - الصفحة الأخيرة خلاصة أو قائمة تحقق عملية.
-- أعد JSON فقط: title, subtitle, pages[{headline,body,bullets}], sources[].'''
+- أعد JSON فقط: title, subtitle, pages[{{headline,body,bullets}}], sources[{{name,url}}].'''
     try:
         client=OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        data=extract_json(client.responses.create(model=os.getenv("OPENAI_MODEL","gpt-5"),input=prompt,store=False).output_text)
+        research_mode="user_reference" if grounding else "official_web"
+        if not grounding:
+            prompt+='''\nلا توجد مادة كافية من مراجع المستخدم. ابحث في الويب، واستخدم فقط مصادر أولية رسمية من: nist.gov، cisa.gov، iso.org، isaca.org، isc2.org، enisa.europa.eu، ncsc.gov.uk، owasp.org. أعد الروابط المباشرة التي استخدمتها داخل sources. لا تستخدم مدونات تجارية أو مواقع أخبار.'''
+        kwargs={"model":os.getenv("OPENAI_MODEL","gpt-5"),"input":prompt,"store":False}
+        if not grounding: kwargs["tools"]=[{"type":"web_search"}]
+        data=extract_json(client.responses.create(**kwargs).output_text)
         pages=data.get("pages") or []
         if len(pages)!=5: return fallback
         banned=re.compile(r"(?:\bأرى\b|من وجهة نظري|كرئيس|كمدير|أنصحكم)")
         for page in pages:
             text=" ".join([str(page.get("headline","")),str(page.get("body",""))," ".join(map(str,page.get("bullets") or []))])
             if banned.search(text): return fallback
-        return {"title":str(data.get("title") or fallback["title"])[:500],"subtitle":str(data.get("subtitle") or fallback["subtitle"])[:300],"pages":[{"headline":str(p.get("headline") or "")[:300],"body":str(p.get("body") or "")[:1600],"bullets":[str(x)[:350] for x in (p.get("bullets") or [])[:4]]} for p in pages],"sources":source_names[:4]}
+        official=("nist.gov","cisa.gov","iso.org","isaca.org","isc2.org","enisa.europa.eu","ncsc.gov.uk","owasp.org")
+        web_sources=[]
+        if research_mode=="official_web":
+            for src in data.get("sources") or []:
+                if not isinstance(src,dict): continue
+                url=str(src.get("url") or "").strip();host=(urlparse(url).hostname or "").lower().removeprefix("www.")
+                if url and any(host==x or host.endswith("."+x) for x in official):web_sources.append(str(src.get("name") or host))
+            if not web_sources:return fallback
+        final_sources=source_names[:4] if research_mode=="user_reference" else web_sources[:4]
+        return {"title":str(data.get("title") or fallback["title"])[:500],"subtitle":str(data.get("subtitle") or fallback["subtitle"])[:300],"pages":[{"headline":str(p.get("headline") or "")[:300],"body":str(p.get("body") or "")[:1600],"bullets":[str(x)[:350] for x in (p.get("bullets") or [])[:4]]} for p in pages],"sources":final_sources,"research_mode":research_mode}
     except Exception:
         return fallback
 
@@ -533,12 +562,12 @@ def _supporting_pdf_carousel(outline):
 
 @app.post("/api/linkedin/studio/posts/{post_id}/supporting-file/generate")
 def linkedin_studio_supporting_file_generate(post_id: str, req: SupportingFileGenerateRequest):
-    with db_conn() as c: post=c.execute("SELECT id,title,text,content FROM linkedin_studio_posts WHERE id=%s",(post_id,)).fetchone()
+    with db_conn() as c: post=c.execute("SELECT id,week,day,pillar,title,text,content FROM linkedin_studio_posts WHERE id=%s",(post_id,)).fetchone()
     if not post: raise HTTPException(404,"منشور LinkedIn غير موجود")
     outline=_supporting_outline(post,req); pdf=_supporting_pdf_carousel(outline); asset_id=f"{post_id}-support-generated-{uuid.uuid4().hex[:10]}"; name=f"{outline['title'][:90]}.pdf"
     with db_conn() as c:
         c.execute("INSERT INTO linkedin_studio_assets(id,post_id,kind,name,mime_type,data,sort_order,alt_text) VALUES(%s,%s,'supporting_file',%s,'application/pdf',%s,0,%s)",(asset_id,post_id,name,pdf,"ملف داعم بهوية نبض سيبراني"));c.commit()
-    return {"generated":True,"id":asset_id,"name":name,"mime_type":"application/pdf","size":len(pdf),"title":outline["title"],"pages":6}
+    return {"generated":True,"id":asset_id,"name":name,"mime_type":"application/pdf","size":len(pdf),"title":outline["title"],"pages":6,"research_mode":outline.get("research_mode"),"sources":outline.get("sources",[])}
 
 def _linkedin_rtl_text(text: str):
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
