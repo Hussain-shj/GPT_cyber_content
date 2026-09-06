@@ -295,3 +295,79 @@
   observer.observe(document.documentElement, {childList:true, subtree:true});
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensureVideoPanel); else ensureVideoPanel();
 })();
+
+/* Cyber Pulse posts: supporting A4 PDF using the existing verified PDF engine */
+(() => {
+  const q = id => document.getElementById(id);
+  async function json(response){
+    const raw=await response.text();
+    let body={};
+    if(raw){try{body=JSON.parse(raw)}catch{throw new Error(`استجابة غير صالحة (HTTP ${response.status})`)}}
+    if(!response.ok)throw new Error(body.detail||`HTTP ${response.status}`);
+    return body;
+  }
+  async function request(path,options={}){
+    return json(await fetch(path,{headers:{'Content-Type':'application/json',...(options.headers||{})},...options}));
+  }
+  function bytesFromBase64(value){
+    const raw=atob(String(value||''));
+    const bytes=new Uint8Array(raw.length);
+    for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+    return bytes;
+  }
+  function downloadStored(file){
+    const blob=new Blob([bytesFromBase64(file.data_b64)],{type:file.mime_type||'application/pdf'});
+    const url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;a.download=file.name||'cyber-pulse-guide.pdf';a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),20000);
+  }
+  async function createPdf(){
+    if(typeof pulseCurrent==='undefined'||!pulseCurrent?.id)throw new Error('أنشئ المنشور واحفظه أولًا.');
+    const meta=pulseCurrent.meta||pulseCurrent.data?.cyber_pulse_meta||{};
+    const shadowId=`pulse-support-${pulseCurrent.id}`.slice(0,190);
+    const title=String(pulseCurrent.data?.title||pulseCurrent.topic||'دليل نبض سيبراني');
+    const payload={
+      id:shadowId,week:1,day:'نبض سيبراني',pillar:meta.pillar||'Guides',objective:meta.objective||'Download',
+      post_type:'Carousel',title,status:'REVIEW',text:typeof pulseText==='function'?pulseText(pulseCurrent.data):String(pulseCurrent.data?.caption||''),
+      content:{...pulseCurrent.data,cyber_pulse_shadow:true},quality:{}
+    };
+    await request('/api/linkedin/studio/posts',{method:'POST',body:JSON.stringify(payload)});
+    try{
+      const generated=await request(`/api/linkedin/studio/posts/${encodeURIComponent(shadowId)}/supporting-file/generate`,{method:'POST',body:JSON.stringify({file_type:'دليل عملي',title})});
+      const assets=await request(`/api/linkedin/studio/posts/${encodeURIComponent(shadowId)}/assets`);
+      const asset=assets.find(x=>x.id===generated.id&&x.kind==='supporting_file');
+      if(!asset?.data_b64)throw new Error('تم إنشاء الملف ولكن تعذر استرجاع بيانات PDF.');
+      const file={id:generated.id,name:asset.name||generated.name,mime_type:asset.mime_type||'application/pdf',data_b64:asset.data_b64,size:generated.size,pages:generated.pages,points:generated.points,page_size:generated.page_size,research_mode:generated.research_mode,sources:generated.sources||[]};
+      pulseCurrent.data.cyber_pulse_supporting_files=[file];
+      if(typeof savePulse==='function')await savePulse();
+      if(typeof renderPulseResult==='function')renderPulseResult();
+      return file;
+    }finally{
+      try{await request(`/api/linkedin/studio/posts/${encodeURIComponent(shadowId)}`,{method:'DELETE'})}catch{}
+    }
+  }
+  function enhance(){
+    if(typeof pulseCurrent==='undefined'||!pulseCurrent)return;
+    const result=q('pulseResult');
+    if(!result||result.classList.contains('hidden'))return;
+    const meta=pulseCurrent.meta||pulseCurrent.data?.cyber_pulse_meta||{};
+    if(meta.format!=='Guide + PDF')return;
+    const panel=result.querySelector('.pulse-panel');
+    if(!panel||panel.querySelector('[data-pulse-pdf-panel]'))return;
+    const box=document.createElement('div');
+    box.dataset.pulsePdfPanel='1';box.className='pulse-note';
+    const existing=(pulseCurrent.data.cyber_pulse_supporting_files||[])[0];
+    box.innerHTML=existing
+      ? `<strong>الملف الداعم جاهز</strong><br>${existing.page_size||'A4'} • ${existing.pages||'-'} صفحات • ${existing.points||0} نقطة<div class="row" style="margin-top:10px"><button class="action secondary" data-pulse-download-pdf>تحميل PDF</button><button class="action secondary" data-pulse-regenerate-pdf>إعادة توليد PDF</button></div>`
+      : `<strong>ملف Guide + PDF</strong><br>سيتم إنشاء ملف A4 بهوية نبض سيبراني مع التحقق من عدد النقاط قبل الحفظ.<div class="row" style="margin-top:10px"><button class="action" data-pulse-generate-pdf>إنشاء PDF الداعم</button></div>`;
+    panel.appendChild(box);
+    box.querySelector('[data-pulse-download-pdf]')?.addEventListener('click',()=>downloadStored(existing));
+    const build=async button=>{button.disabled=true;q('pulseMsg').textContent='جاري إنشاء ملف A4 والتحقق من عدد النقاط والمصادر...';try{const file=await createPdf();q('pulseMsg').textContent=`تم إنشاء PDF ${file.page_size} من ${file.pages} صفحات ويحتوي على ${file.points} نقطة.`;downloadStored(file)}catch(e){q('pulseMsg').textContent='خطأ في إنشاء PDF: '+e.message}finally{button.disabled=false;setTimeout(enhance,50)}};
+    box.querySelector('[data-pulse-generate-pdf]')?.addEventListener('click',e=>build(e.currentTarget));
+    box.querySelector('[data-pulse-regenerate-pdf]')?.addEventListener('click',e=>build(e.currentTarget));
+  }
+  const observer=new MutationObserver(enhance);
+  observer.observe(document.documentElement,{childList:true,subtree:true});
+  setInterval(enhance,1200);
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',enhance);else enhance();
+})();
