@@ -1,0 +1,30 @@
+name: Upgrade Cyber Pulse prompts
+
+on:
+  push:
+    paths:
+      - 'scripts/upgrade_cyberpulse_prompts.py'
+      - '.github/workflows/upgrade-cyberpulse-prompts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply Cyber Pulse prompt upgrade
+        run: python scripts/upgrade_cyberpulse_prompts.py
+      - name: Commit upgraded prompts
+        run: |
+          if git diff --quiet; then
+            echo "No changes required"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.py index.html
+          git commit -m "Improve Cyber Pulse content and editorial image prompts"
+          git push
