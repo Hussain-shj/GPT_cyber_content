@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 main = Path('main.py')
 index = Path('index.html')
@@ -17,7 +16,7 @@ end = text.find('\ndef _find_gemini_image_data', start)
 if start < 0 or end < 0:
     raise SystemExit('review_artwork function boundaries not found')
 
-new_review = r'''def review_artwork(client: OpenAI, req: ImageRequest, image_b64: str):
+new_review = r"""def review_artwork(client: OpenAI, req: ImageRequest, image_b64: str):
     if req.visual_style == "Cyber Pulse Editorial":
         review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity knowledge platform "نبض سيبراني | CYBER PULSE".
 Evaluate the supplied generated artwork as a KNOWLEDGE/EDITORIAL visual, not as breaking news.
@@ -80,7 +79,7 @@ Set semantic_match=true only when score is at least 82 and technology_visible, m
         and review.get("composition_ok")
     )
     return review
-'''
+"""
 text = text[:start] + new_review + text[end:]
 main.write_text(text, encoding='utf-8')
 
