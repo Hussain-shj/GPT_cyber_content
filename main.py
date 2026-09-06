@@ -1491,7 +1491,30 @@ The caption should paraphrase the reference in an original voice and must end wi
     carousel_style = "" if req.post_type != "Carousel" else """
 The carousel is a neutral practical field guide, not a personal opinion or a message spoken by a CISO, director, president, manager, or expert. Write slide text in an objective instructional style using facts, definitions, steps, checks, and direct practical guidance. Never use first-person authority or opinion language, including: أرى، أعتقد، برأيي، في رأيي، من وجهة نظري، بصفتي، كرئيس، كمدير، كمسؤول، كخبير، من موقعي، من خبرتي، أوصي، نوصي، أؤكد. Do not introduce the author or the author's job title inside any slide.
 """
-    prompt = f"Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals. Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body. Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides. {carousel_style} {grounding}"
+    prompt = f"""Create publish-ready Arabic {req.post_type} about {req.topic} for government/enterprise cybersecurity professionals.
+
+EDITORIAL QUALITY:
+- Write as a practical cybersecurity/GRC knowledge publication: clear, analytical, useful, and easy to scan. Do not sound like a policy memo, academic paper, sales copy, or generic AI prose.
+- Lead with the practical idea and decision value. Prefer concrete explanations, cause/effect, examples, checks, and actionable distinctions over jargon.
+- Do NOT stack framework or standard names to signal expertise. Mention ISO, NIST, COSO, COBIT, or another framework ONLY when it is materially necessary to explain the topic or explicitly supported by the supplied reference.
+- Never invent statistics, legal requirements, framework claims, citations, downloads, templates, checklists, files, or resources.
+- A CTA may invite discussion, reflection, saving, sharing, or following. A CTA may promise a file/template/checklist/download ONLY when the supplied topic or grounding explicitly confirms that resource exists.
+
+CYBER PULSE MODE:
+If the topic begins with metadata like [Insights | Authority], [Guides | Awareness], [Tools | Download], or [Awareness | Engagement], treat the bracketed values as editorial instructions and NEVER reproduce them in the title, hook, caption, or slides.
+- Insights: explain one important idea, misconception, relationship, or decision implication with depth but without unnecessary complexity.
+- Guides: teach a practical sequence, method, checklist, or decision path. Keep it neutral and instructional.
+- Tools: focus on how a practical artifact, assessment, register, matrix, checklist, or template is used; do not claim an artifact exists unless confirmed.
+- Awareness: make the risk and desired behavior immediately understandable without fearmongering.
+- Authority objective: demonstrate expertise through clarity, reasoning, and practical value; never through first-person status claims or excessive framework-name dropping.
+- Engagement objective: end with one specific professional question, not a generic 'what do you think?'.
+- Download objective: only use a download/resource CTA when the input explicitly confirms the resource exists; otherwise use a non-download CTA.
+
+FORMAT:
+Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body.
+Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides.
+{carousel_style}
+{grounding}"""
     kw = {"model":model,"input":prompt,"store":False}
     if req.use_web_search: kw["tools"]=[{"type":"web_search"}]
     try:
@@ -1640,6 +1663,58 @@ def source_publication_date(url: str) -> str:
     return ""
 
 def visual_prompt(req: ImageRequest):
+    if req.visual_style == "Cyber Pulse Editorial":
+        pillar = str(getattr(req, "pillar", "") or "").strip()
+        domain = str(req.domain or "").strip()
+        return f"""Create ONLY the background artwork for a premium Cyber Pulse knowledge/editorial post. This is NOT breaking news, NOT an incident alert, and NOT a SOC/hacker scene.
+FORMAT: vertical 4:5 portrait, designed for a final 1080x1350 social post.
+
+SUBJECT:
+Title concept: {req.title}
+Supporting context: {req.body}
+Domain: {domain}
+
+VISUAL GOAL:
+Translate the exact knowledge concept into ONE clear executive/editorial visual metaphor that a cybersecurity, GRC, risk, governance, compliance, resilience, or enterprise audience can understand at a glance. The image must explain the relationship or decision concept, not merely decorate it. Every prominent object must be traceable to the supplied subject.
+
+CYBER PULSE IDENTITY:
+- Deep near-black navy #050B14 grading into #0B2340.
+- Electric cyan #00D4FF and blue #1565C0 as the primary luminous accents.
+- Premium modern isometric/semi-3D enterprise cybersecurity editorial aesthetic.
+- Subtle radar/orbit, network, circuit, or data-line texture at very low visual intensity.
+- Clean, sophisticated, institutional, credible, modern; never gaming-like.
+- Use ONE restrained semantic accent only when useful: amber for warning/attention, red only for genuine threat/critical risk, teal/green for healthy/compliant state.
+
+COMPOSITION:
+- One dominant visual idea, not a collage and not a multi-panel infographic.
+- Keep the explanatory visual concentrated in the center/lower area with strong depth and hierarchy.
+- Preserve generous clean negative space for the application's Arabic overlay. Keep the upper 35-40% dark and low-detail; do not place faces, bright objects, dashboards, or important details there.
+- Keep additional safe space for the fixed Cyber Pulse logo and category badge.
+- For a Single Image, create one memorable hero concept. For carousel artwork, represent ONLY this slide's specific idea while maintaining the same visual language across the series.
+
+CONCEPT MAPPING:
+- Governance: direction, accountability, decision rights, ownership, executive alignment, controlled pathways.
+- Risk: assets/exposure, uncertainty, prioritization, treatment choices, risk ownership, decision impact.
+- Compliance: obligations, evidence, assurance, control verification, traceability; avoid generic checkmark wallpaper.
+- GRC: show governance, risk, and compliance as an integrated decision system rather than three disconnected icons.
+- ISO 27001: show an operating management system, control/evidence/risk linkage, and continuous improvement; do not make a certificate the hero.
+- Third-Party Risk: show dependency and risk propagation across a supplier ecosystem.
+- Cyber Resilience: show continuity, recovery, redundancy, and service restoration rather than backup alone.
+- Data Protection: show controlled data flow, classification/protection boundaries, and authorized use.
+- Incident Response: show coordinated response stages and containment/recovery only when the subject is actually incident response.
+
+ABSOLUTE NO-TEXT RULE:
+ZERO readable Arabic or English. No words, letters, numbers, framework names, UI labels, captions, headlines, hashtags, watermarks, signatures, pseudo-text, typographic logos, or fake interface copy. The application adds Arabic RTL text, logo, badge, divider, footer, and border after generation.
+
+DO NOT CREATE:
+Generic hooded hackers, masks, skulls, Matrix code, random binary rain, generic SOC rooms, unrelated dashboards, floating padlocks as the sole idea, giant shields as the sole idea, dense flowcharts, labeled diagrams, text-bearing UI, excessive holograms, stock-photo poses, or unrelated cyber clichés. Do not turn abstract technical words into literal physical objects unless the topic genuinely requires them.
+
+FINAL SELF-CHECK BEFORE RENDERING:
+1) Does the scene communicate this exact slide/topic without relying on generated text?
+2) Is the concept useful and executive/editorial rather than generic cybersecurity decoration?
+3) Is the Cyber Pulse navy/cyan identity unmistakable?
+4) Is the text-safe area genuinely clean?
+If any answer is no, revise the composition before rendering."""
     if req.visual_style == "Cyber Pulse":
         story = f"{req.title} {req.body} {req.visual_direction}".lower()
         zoom_contract = ""
