@@ -1507,11 +1507,13 @@ If the topic begins with metadata like [Insights | Authority], [Guides | Awarene
 - Tools: focus on how a practical artifact, assessment, register, matrix, checklist, or template is used; do not claim an artifact exists unless confirmed.
 - Awareness: make the risk and desired behavior immediately understandable without fearmongering.
 - Authority objective: demonstrate expertise through clarity, reasoning, and practical value; never through first-person status claims or excessive framework-name dropping.
+- For GRC relationship topics, prefer precise language such as: governance sets direction and accountability; risk prioritizes uncertainty and treatment; compliance demonstrates adherence through evidence. Avoid vague phrases like "three boxes" unless the contrast is immediately clarified as "three separate boxes".
+- Keep slide copy natural Arabic. Prefer "ترتّب الأولويات" over vague literal translations such as "تعطي الأولويات", and prefer "قرارات أكثر وعيًا بالمخاطر" when that is the intended meaning.
 - Engagement objective: end with one specific professional question, not a generic 'what do you think?'.
 - Download objective: only use a download/resource CTA when the input explicitly confirms the resource exists; otherwise use a non-download CTA.
 
 FORMAT:
-Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 9 words and maximum 2 visual lines. Each slide body MUST be maximum 32 words, written as one compact idea suitable for no more than 4 visual lines. Put extended explanations in the caption, never in slide body.
+Exactly {req.slides} slides if carousel. Each slide headline MUST be concise: maximum 8 words and maximum 2 visual lines. Each slide body MUST be maximum 24 words, written as one compact idea suitable for no more than 3 visual lines. Put extended explanations in the caption, never in slide body.
 Return ONLY JSON with title,hook,caption,recommendations,cta,keywords,hashtags,slides(number,headline,body),sources. Never invent citations. Hashtags never belong in slides.
 {carousel_style}
 {grounding}"""
