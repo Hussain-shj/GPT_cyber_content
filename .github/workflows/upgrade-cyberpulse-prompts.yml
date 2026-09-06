@@ -6,6 +6,7 @@ on:
       - 'scripts/upgrade_cyberpulse_prompts.py'
       - 'scripts/fix_cyberpulse_editorial.py'
       - 'scripts/repair_index_download.py'
+      - 'scripts/fix_cyberpulse_card_v2.py'
       - '.github/workflows/upgrade-cyberpulse-prompts.yml'
   workflow_dispatch:
 
@@ -25,6 +26,8 @@ jobs:
         run: python scripts/upgrade_cyberpulse_prompts.py
       - name: Apply Cyber Pulse editorial fixes
         run: python scripts/fix_cyberpulse_editorial.py
+      - name: Apply Cyber Pulse card v2
+        run: python scripts/fix_cyberpulse_card_v2.py
       - name: Commit upgraded prompts
         run: |
           if git diff --quiet; then
@@ -34,5 +37,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add main.py index.html
-          git commit -m "Restore Cyber Pulse index and add image download"
+          git commit -m "Refine Cyber Pulse logo, layout and slide copy"
           git push
