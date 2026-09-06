@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/upgrade_cyberpulse_prompts.py'
       - 'scripts/fix_cyberpulse_editorial.py'
+      - 'scripts/repair_index_download.py'
       - '.github/workflows/upgrade-cyberpulse-prompts.yml'
   workflow_dispatch:
 
@@ -16,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore index and add image download
+        run: python scripts/repair_index_download.py
       - name: Apply Cyber Pulse prompt upgrade
         run: python scripts/upgrade_cyberpulse_prompts.py
       - name: Apply Cyber Pulse editorial fixes
@@ -29,5 +34,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add main.py index.html
-          git commit -m "Fix Cyber Pulse editorial image mode and QC"
+          git commit -m "Restore Cyber Pulse index and add image download"
           git push
