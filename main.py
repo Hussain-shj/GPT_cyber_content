@@ -62,7 +62,7 @@ class ImageRequest(BaseModel):
     slide_number: int = 1
     post_type: Literal["Carousel", "Infographic", "Single Post"] = "Single Post"
     domain: str = "GRC"
-    visual_style: Literal["GRC Professional", "Cyber Pulse", "Executive Minimal", "Infographic"] = "GRC Professional"
+    visual_style: Literal["GRC Professional", "Cyber Pulse", "Cyber Pulse Editorial", "Executive Minimal", "Infographic"] = "GRC Professional"
     visual_direction: str = ""
     variant_index: int = Field(default=1, ge=1, le=3)
 
@@ -1748,7 +1748,29 @@ Final self-check before rendering: (1) would a viewer identify the technology an
     return style + "\n" + common
 
 def review_artwork(client: OpenAI, req: ImageRequest, image_b64: str):
-    review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
+    if req.visual_style == "Cyber Pulse Editorial":
+        review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity knowledge platform "نبض سيبراني | CYBER PULSE".
+Evaluate the supplied generated artwork as a KNOWLEDGE/EDITORIAL visual, not as breaking news.
+
+TOPIC TITLE: {req.title}
+SUPPORTING CONTEXT: {req.body}
+DOMAIN: {req.domain}
+
+Score these criteria:
+1. Concept fidelity: the scene communicates the exact governance/risk/compliance/cybersecurity concept rather than generic cyber decoration.
+2. Practical meaning: a professional viewer can infer the relationship, decision, process, dependency, control, resilience, or risk idea without relying on generated text.
+3. Cyber Pulse identity: premium deep navy #050B14/#0B2340 with cyan #00D4FF and blue #1565C0, sophisticated enterprise editorial quality.
+4. Composition: one dominant visual idea with hierarchy and depth; no collage, dense infographic, generic dashboard wall, or stock-photo feeling.
+5. Text-safe layout: the upper 35-40% is genuinely dark, low-detail and usable for the application's Arabic headline; top-right logo/badge space is clear.
+6. No generated readable text, pseudo-text, watermarks, framework names, labels, captions, or typographic logos.
+7. No unrelated hacker/SOC clichés, masks, skulls, Matrix code, random binary rain, giant generic padlock/shield as the sole concept, or excessive holograms.
+8. Domain semantics are appropriate: GRC is integrated rather than three disconnected icons; governance shows direction/accountability; risk shows prioritization/exposure/treatment; compliance shows evidence/assurance/traceability; resilience shows continuity/recovery; third-party risk shows dependencies.
+
+Return ONLY valid JSON:
+{{"semantic_match":true,"score":0,"technology_visible":true,"mechanism_visible":true,"composition_ok":true,"issues":["concise issue"],"retry_direction":"specific English correction prompt for the image generator","summary_ar":"سطر عربي مختصر يشرح نتيجة المراجعة"}}
+For this editorial mode, technology_visible means the SUBJECT/DOMAIN concept is visibly identifiable, and mechanism_visible means the relationship/process/decision logic is visually understandable. Set semantic_match=true only when score is at least 82 and technology_visible, mechanism_visible, and composition_ok are all true.'''
+    else:
+        review_prompt = f'''You are the visual quality-control reviewer for the Arabic cybersecurity publication "نبض سيبراني | CYBER PULSE".
 Evaluate the supplied generated artwork against the factual news context. Review the IMAGE itself, not merely the prompt.
 Use ONLY the supplied news title, factual context, and required visual direction. Never require an object, screen, feature, update window, download, patch, vendor, or attack step that is not supported by this specific story. Do not carry requirements from another cybersecurity story.
 
