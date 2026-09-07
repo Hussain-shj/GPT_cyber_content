@@ -4,7 +4,9 @@ on:
   push:
     paths:
       - 'cyberpulse-card-addon.js'
+      - 'cyberpulse-copy-addon.js'
       - 'scripts/apply_cyberpulse_card_addon.py'
+      - 'scripts/apply_cyberpulse_copy_addon.py'
       - '.github/workflows/upgrade-cyberpulse-prompts.yml'
   workflow_dispatch:
 
@@ -20,7 +22,9 @@ jobs:
           fetch-depth: 0
       - name: Install safe Cyber Pulse card addon
         run: python scripts/apply_cyberpulse_card_addon.py
-      - name: Commit addon into bundled JavaScript
+      - name: Install Cyber Pulse formatted copy addon
+        run: python scripts/apply_cyberpulse_copy_addon.py
+      - name: Commit addons into bundled JavaScript
         run: |
           if git diff --quiet; then
             echo "No changes required"
@@ -29,5 +33,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add news-search.js
-          git commit -m "Apply Cyber Pulse logo, rights footer and safe text fitting"
+          git commit -m "Add Cyber Pulse formatted content copy feature"
           git push
