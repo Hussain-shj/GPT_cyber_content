@@ -3,11 +3,8 @@ name: Upgrade Cyber Pulse prompts
 on:
   push:
     paths:
-      - 'scripts/upgrade_cyberpulse_prompts.py'
-      - 'scripts/fix_cyberpulse_editorial.py'
-      - 'scripts/repair_index_download.py'
-      - 'scripts/fix_cyberpulse_card_v2.py'
-      - 'scripts/fix_cyberpulse_footer_logo_fit.py'
+      - 'cyberpulse-card-addon.js'
+      - 'scripts/apply_cyberpulse_card_addon.py'
       - '.github/workflows/upgrade-cyberpulse-prompts.yml'
   workflow_dispatch:
 
@@ -21,17 +18,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Restore index and add image download
-        run: python scripts/repair_index_download.py
-      - name: Apply Cyber Pulse prompt upgrade
-        run: python scripts/upgrade_cyberpulse_prompts.py
-      - name: Apply Cyber Pulse editorial fixes
-        run: python scripts/fix_cyberpulse_editorial.py
-      - name: Apply Cyber Pulse card v2
-        run: python scripts/fix_cyberpulse_card_v2.py
-      - name: Apply Cyber Pulse footer, logo and fit
-        run: python scripts/fix_cyberpulse_footer_logo_fit.py
-      - name: Commit upgraded prompts
+      - name: Install safe Cyber Pulse card addon
+        run: python scripts/apply_cyberpulse_card_addon.py
+      - name: Commit addon into bundled JavaScript
         run: |
           if git diff --quiet; then
             echo "No changes required"
@@ -39,6 +28,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add main.py index.html
-          git commit -m "Apply Cyber Pulse logo, rights footer and text fit"
+          git add news-search.js
+          git commit -m "Apply Cyber Pulse logo, rights footer and safe text fitting"
           git push
