@@ -5,8 +5,10 @@ on:
     paths:
       - 'cyberpulse-card-addon.js'
       - 'cyberpulse-copy-addon.js'
+      - 'cyberpulse-dual-image-addon.js'
       - 'scripts/apply_cyberpulse_card_addon.py'
       - 'scripts/apply_cyberpulse_copy_addon.py'
+      - 'scripts/apply_dual_image_comparison.py'
       - '.github/workflows/upgrade-cyberpulse-prompts.yml'
   workflow_dispatch:
 
@@ -24,7 +26,9 @@ jobs:
         run: python scripts/apply_cyberpulse_card_addon.py
       - name: Install Cyber Pulse formatted copy addon
         run: python scripts/apply_cyberpulse_copy_addon.py
-      - name: Commit addons into bundled JavaScript
+      - name: Install dual image comparison
+        run: python scripts/apply_dual_image_comparison.py
+      - name: Commit addons into application
         run: |
           if git diff --quiet; then
             echo "No changes required"
@@ -32,6 +36,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add news-search.js
-          git commit -m "Add Cyber Pulse formatted content copy feature"
+          git add news-search.js main.py
+          git commit -m "Add Nano Banana and OpenAI image comparison"
           git push
