@@ -1,0 +1,32 @@
+/* Cyber Pulse weekly publishing plan addon */
+(() => {
+  const PLAN = [
+    {week:1,day:'الثلاثاء',pillar:'Insights',domain:'GRC',format:'Carousel',objective:'Authority',title:'GRC منظومة قرار واحدة',idea:'كيف تعمل الحوكمة والمخاطر والامتثال معًا كمنظومة واحدة تدعم اتخاذ القرار؟'},
+    {week:1,day:'الخميس',pillar:'Awareness',domain:'Risk',format:'Carousel',objective:'Awareness',title:'التهديد ≠ الثغرة ≠ المخاطر',idea:'الفرق بين التهديد (Threat) والثغرة (Vulnerability) والمخاطر (Risk)، وكيف يؤدي الخلط بينها إلى تقييم غير دقيق للمخاطر واتخاذ أولويات أمنية غير مناسبة، مع مثال عملي يوضح العلاقة بينها.'},
+    {week:2,day:'الثلاثاء',pillar:'Insights',domain:'Risk',format:'Carousel',objective:'Authority',title:'تقييم المخاطر يبدأ من أثر الأعمال',idea:'لماذا لا يكفي تقييم الثغرات التقنية وحدها، وكيف يربط تقييم المخاطر بين الأصل والتهديد والثغرة واحتمالية الحدوث وأثر الأعمال؟'},
+    {week:2,day:'الخميس',pillar:'Guides',domain:'Risk',format:'Carousel',objective:'Awareness',title:'شهية المخاطر ليست رقمًا فقط',idea:'شرح مبسط لشهية المخاطر Risk Appetite وعلاقتها بحدود التحمل واتخاذ القرار، مع مثال عملي للمؤسسات.'},
+    {week:3,day:'الثلاثاء',pillar:'Insights',domain:'Governance',format:'Carousel',objective:'Authority',title:'الحوكمة تحدد من يقرر',idea:'كيف توضح الحوكمة السيبرانية الأدوار والمسؤوليات والصلاحيات ومسارات التصعيد، ولماذا يؤثر غموضها في سرعة القرار؟'},
+    {week:3,day:'الخميس',pillar:'Guides',domain:'Compliance',format:'Carousel',objective:'Awareness',title:'الامتثال لا يعني الأمان',idea:'توضيح الفرق بين تحقيق متطلبات الامتثال وإدارة المخاطر الأمنية فعليًا، ولماذا يجب أن يعمل الاثنان معًا.'},
+    {week:4,day:'الثلاثاء',pillar:'Insights',domain:'Third-Party Risk',format:'Carousel',objective:'Authority',title:'المورد قد يوسّع سطح المخاطر',idea:'كيف تنشأ المخاطر السيبرانية من الأطراف الثالثة، وما الذي يجب فهمه قبل منح المورد وصولًا إلى الأنظمة أو البيانات؟'},
+    {week:4,day:'الخميس',pillar:'Awareness',domain:'Cyber Resilience',format:'Carousel',objective:'Awareness',title:'الاستمرارية ليست نسخة احتياطية فقط',idea:'الفرق بين النسخ الاحتياطي واستمرارية الأعمال والتعافي والمرونة السيبرانية، وكيف تتكامل للحفاظ على الخدمات الحرجة.'}
+  ];
+  const $=s=>document.querySelector(s);
+  function style(){if($('#cpScheduleStyle'))return;const s=document.createElement('style');s.id='cpScheduleStyle';s.textContent=`.cp-plan{margin:0 0 18px;padding:18px;background:#081625;border:1px solid #163b56;border-radius:16px}.cp-plan-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.cp-week-tabs{display:flex;gap:7px;flex-wrap:wrap}.cp-week-tabs button{padding:7px 12px;background:#10283c;color:#dff7ff;border:1px solid #24506a}.cp-week-tabs button.active{background:#00d4ff;color:#03121a}.cp-plan-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.cp-topic{padding:14px;border:1px solid #24506a;border-radius:13px;background:#061421;cursor:pointer}.cp-topic:hover{border-color:#00d4ff}.cp-topic small{color:#8fb1c7}.cp-topic h3{margin:7px 0;font-size:17px}.cp-topic .meta{color:#00d4ff;font-size:12px}.cp-selected{box-shadow:0 0 0 2px #00d4ff inset}@media(max-width:800px){.cp-plan-grid{grid-template-columns:1fr}}`;document.head.appendChild(s)}
+  function findSection(){return $('#pulse')||[...document.querySelectorAll('section,div')].find(x=>/منشورات نبض سيبراني/.test(x.textContent||'')&&x.querySelector('select,textarea'))}
+  function setSelectByValue(select,value){if(!select)return;const opt=[...select.options].find(o=>o.value===value||o.textContent.trim()===value);if(opt){select.value=opt.value;select.dispatchEvent(new Event('change',{bubbles:true}))}}
+  function fill(item){
+    const section=findSection();if(!section)return;
+    const idea=section.querySelector('textarea');if(idea){idea.value=item.idea;idea.dispatchEvent(new Event('input',{bubbles:true}))}
+    const selects=[...section.querySelectorAll('select')];
+    const by=(values)=>selects.find(s=>[...s.options].some(o=>values.includes(o.value)||values.includes(o.textContent.trim())));
+    setSelectByValue(by(['GRC','Governance','Risk','Compliance']),item.domain);
+    setSelectByValue(by(['Carousel','Single Image','Guide + PDF','Text Post']),item.format);
+    setSelectByValue(by(['Authority','Awareness','Engagement','Download']),item.objective);
+    const pillars=[...section.querySelectorAll('.pulse-pillar,.pillar')];const p=pillars.find(x=>(x.dataset.v||x.dataset.value||x.textContent).includes(item.pillar));if(p)p.click();
+    document.querySelectorAll('.cp-topic').forEach(x=>x.classList.remove('cp-selected'));document.querySelector(`[data-cp-key="${item.week}-${item.day}"]`)?.classList.add('cp-selected');
+    const msg=$('#pulseMsg');if(msg)msg.textContent=`تم تجهيز موضوع الأسبوع ${item.week} - ${item.day}. راجع المحتوى ثم اضغط إنشاء المحتوى.`;
+  }
+  function renderWeek(root,week){root.querySelectorAll('.cp-week-tabs button').forEach(b=>b.classList.toggle('active',Number(b.dataset.week)===week));const grid=root.querySelector('.cp-plan-grid');grid.innerHTML='';PLAN.filter(x=>x.week===week).forEach(x=>{const c=document.createElement('div');c.className='cp-topic';c.dataset.cpKey=`${x.week}-${x.day}`;c.innerHTML=`<small>الأسبوع ${x.week} • ${x.day}</small><h3>${x.title}</h3><div class="meta">${x.pillar} • ${x.domain} • ${x.format} • ${x.objective}</div>`;c.onclick=()=>fill(x);grid.appendChild(c)})}
+  function install(){style();const section=findSection();if(!section||section.querySelector('[data-cp-schedule]'))return;const anchor=section.querySelector('.pulse-panel,.card')||section.firstElementChild||section;const box=document.createElement('div');box.className='cp-plan';box.dataset.cpSchedule='1';box.innerHTML=`<div class="cp-plan-head"><div><strong>خطة منشورات نبض سيبراني</strong><div style="color:#91abc0;font-size:13px">اختر الأسبوع واليوم ليتم تعبئة الموضوع والمجال والشكل والهدف تلقائيًا.</div></div><div class="cp-week-tabs">${[1,2,3,4].map(w=>`<button type="button" data-week="${w}">الأسبوع ${w}</button>`).join('')}</div></div><div class="cp-plan-grid"></div>`;anchor.parentNode.insertBefore(box,anchor);box.querySelectorAll('[data-week]').forEach(b=>b.onclick=()=>renderWeek(box,Number(b.dataset.week)));renderWeek(box,1)}
+  const obs=new MutationObserver(install);obs.observe(document.documentElement,{childList:true,subtree:true});if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install);else install();
+})();
